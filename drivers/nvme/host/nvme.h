@@ -317,6 +317,15 @@ struct nvme_fault_inject {
 };
 #endif
 
+struct nvme_fs_obj {
+	struct list_head list;
+
+	u8 obj_id[NVME_OBJ_ID_MAXLEN];
+
+	void *data; /* Allocated using vmalloc since objects can be big */
+	u64 data_len;
+};
+
 struct nvme_ns {
 	struct list_head list;
 
@@ -348,6 +357,11 @@ struct nvme_ns {
 	struct nvme_fault_inject fault_inject;
 #endif
 
+
+	// Currently, all file system objects are stored in memory and not in
+	// the disk.
+	struct list_head fs_objects;
+	struct mutex obj_mutex;
 };
 
 struct nvme_ctrl_ops {

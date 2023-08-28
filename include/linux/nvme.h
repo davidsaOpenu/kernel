@@ -34,6 +34,9 @@
 
 #define NVME_NSID_ALL		0xffffffff
 
+#define NVME_OBJ_ID_MAXLEN	64
+
+
 enum nvme_subsys_type {
 	NVME_NQN_DISC	= 1,		/* Discovery type target subsystem */
 	NVME_NQN_NVME	= 2,		/* NVME type target subsystem */
