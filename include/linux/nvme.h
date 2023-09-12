@@ -34,7 +34,7 @@
 
 #define NVME_NSID_ALL		0xffffffff
 
-#define NVME_OBJ_ID_MAXLEN	64
+#define NVME_OBJ_ID_MAXLEN	16
 
 
 enum nvme_subsys_type {
@@ -690,6 +690,22 @@ struct nvme_rw_command {
 	__le16			appmask;
 };
 
+struct nvme_kv_command {
+	__u8			opcode;
+	__u8			flags;
+	__u16			command_id;
+	__le32			nsid;
+	__u64			key_low;
+	__le64			metadata;
+	union nvme_data_ptr	dptr;
+	__le32			value_size;
+	__u8			key_length;
+	__u8			options; // Relevent only to store/retreive
+	__u16			rsvd11;
+	__u32			rsvd12[2];
+	__u64			key_high;
+};
+
 enum {
 	NVME_RW_LR			= 1 << 15,
 	NVME_RW_FUA			= 1 << 14,
@@ -1151,6 +1167,7 @@ struct nvme_command {
 	union {
 		struct nvme_common_command common;
 		struct nvme_rw_command rw;
+		struct nvme_kv_command kv;
 		struct nvme_identify identify;
 		struct nvme_features features;
 		struct nvme_create_cq create_cq;
