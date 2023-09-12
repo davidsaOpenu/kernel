@@ -56,26 +56,29 @@ struct nvme_passthru_cmd {
 
 #define nvme_admin_cmd nvme_passthru_cmd
 
-enum nvme_obj_opcode {
-	nvme_obj_cmd_read 	= 0x0,
-	nvme_obj_cmd_write 	= 0x3,
-	nvme_obj_cmd_list 	= 0x4,
-	nvme_obj_cmd_delete = 0x7,
+enum nvme_kv_opcode {
+	nvme_kv_store     = 0x01,
+	nvme_kv_retrieve  = 0x02,
+	nvme_kv_list	  = 0x06,
+	nvme_kv_delete	  = 0x10,
 };
 
-#define NVME_OBJ_ID_MAXLEN	64
+#define NVME_OBJ_ID_MAXLEN	16
 
 struct nvme_user_obj_io {
 	__u8	opcode;
 	__u64   offset;
 	__u64	length; // in/out
 	__u64	addr;
-	__u8	obj_id[NVME_OBJ_ID_MAXLEN];
-};
 
-struct nvme_user_obj_dirent {
-	__u8 	obj_id[NVME_OBJ_ID_MAXLEN];
-	__u64	obj_len;
+	union {
+		__u8 key[NVME_OBJ_ID_MAXLEN];
+        struct {
+            __u64 key_low;
+            __u64 key_high;
+        };
+	};
+
 };
 
 #define NVME_IOCTL_ID		_IO('N', 0x40)
