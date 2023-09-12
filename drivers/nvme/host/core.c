@@ -383,122 +383,23 @@ bool nvme_change_ctrl_state(struct nvme_ctrl *ctrl,
 }
 EXPORT_SYMBOL_GPL(nvme_change_ctrl_state);
 
-
-// if obj_id is not NULL - free that object
-// otherwise - free all.
-static void nvme_submit_obj_cmd_delete(struct nvme_ns *ns, const u8 *obj_id)
-{
-	struct nvme_fs_obj *obj, *next;
-
-	list_for_each_entry_safe(obj, next, &ns->fs_objects, list) {
-		if (obj_id &&
-			0 != (memcmp(obj_id, obj->obj_id, ARRAY_SIZE(obj->obj_id))))
-				continue;
-
-		list_del(&obj->list);
-		vfree(obj->data);
-		kfree(obj);
-	}
-}
-
-static int nvme_submit_obj_cmd_write(struct nvme_ns *ns,
-	const u8 *obj_id, void __user *addr, u64 length, u64 offset)
-{
-	struct nvme_fs_obj *obj;
-
-	// Writing to a specific offset in a file is not supported (since each
-	// write should delete the file).
-	if (offset != 0)
-		return -EINVAL;
-
-	nvme_submit_obj_cmd_delete(ns, obj_id);
-
-	obj = kzalloc(sizeof(*obj), GFP_KERNEL);
-	if (!obj)
-		return -ENOMEM;
-
-	memcpy(obj->obj_id, obj_id, ARRAY_SIZE(obj->obj_id));
-	obj->data_len = length;
-	if (length > 0) {
-		obj->data = vmalloc(length);
-		if (!obj->data) {
-			kfree(obj);
-			return -ENOMEM;
-		}
-	}
-
-	if (copy_from_user(obj->data, addr, length)) {
-		vfree(obj->data);
-		kfree(obj);
-		return -EFAULT;
-	}
-
-	list_add(&obj->list, &ns->fs_objects);
-	return 0;
-}
-
-static int nvme_submit_obj_cmd_read(struct nvme_ns *ns,
-	const u8 *obj_id, void __user *addr, u64 *length, u64 offset)
-{
-	struct nvme_fs_obj *obj;
-
-	list_for_each_entry(obj, &ns->fs_objects, list) {
-		if (0 != memcmp(obj_id, obj->obj_id, ARRAY_SIZE(obj->obj_id)))
-			continue;
-
-		if (offset > obj->data_len)
-			return -EINVAL;
-
-		*length = min(obj->data_len - offset, *length);
-		if (copy_to_user(addr, obj->data + offset, *length))
-			return -EFAULT;
-
-		return 0;
-	}
-
-	return -ENOENT;
-}
-
-static int nvme_submit_obj_cmd_list(struct nvme_ns *ns, void __user *addr,
-	u64 *length, u64 offset)
-{
-	struct nvme_fs_obj *obj;
-	u64 buf_offset = 0;
-	u64 first_entry = offset / sizeof(struct nvme_user_obj_dirent);
-	int i = 0;
-
-	if ((offset % sizeof(struct nvme_user_obj_dirent)) != 0)
-		return -EINVAL;
-
-	list_for_each_entry(obj, &ns->fs_objects, list) {
-		struct nvme_user_obj_dirent dirent;
-
-		if ((i++) < first_entry)
-			continue;
-
-		if ((buf_offset + sizeof(dirent)) > *length)
-			break;
-
-		memcpy(dirent.obj_id, obj->obj_id, ARRAY_SIZE(dirent.obj_id));
-		dirent.obj_len = obj->data_len;
-
-		if (copy_to_user(addr + buf_offset, &dirent, sizeof(dirent)))
-			return -EFAULT;
-
-		buf_offset += sizeof(dirent);
-	}
-
-	*length = buf_offset;
-	return 0;
-}
+static int nvme_submit_user_cmd(struct request_queue *q,
+		struct nvme_command *cmd, void __user *ubuffer,
+		unsigned bufflen, void __user *meta_buffer, unsigned meta_len,
+		u32 meta_seed, u32 *result, unsigned timeout);
+static u32 nvme_passthru_start(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
+								u8 opcode);
+static void nvme_passthru_end(struct nvme_ctrl *ctrl, u32 effects);
 
 static int nvme_submit_obj_io(struct nvme_ns *ns,
 	struct nvme_user_obj_io __user *uio)
 {
+	struct nvme_command c;
 	struct nvme_user_obj_io io;
 	int ret;
 	u64 length;
 	u64 offset;
+	u32 result;
 	void __user *addr;
 
 	if (copy_from_user(&io, uio, sizeof(io)))
@@ -508,35 +409,32 @@ static int nvme_submit_obj_io(struct nvme_ns *ns,
 	length = io.length;
 	addr = (void __user *)io.addr;
 
-	if (mutex_lock_interruptible(&ns->obj_mutex) !=0)
-		return -EINTR;
+	memset(&c, 0, sizeof(c));
+	c.kv.opcode = io.opcode;
+	c.kv.flags = 0;
+	c.kv.nsid = cpu_to_le32(ns->head->ns_id);
+	c.kv.key_low = io.key_low;
+	c.kv.key_high = io.key_high;
+	c.kv.value_size = cpu_to_le32(length);
+	c.kv.key_length = 16;
+	c.kv.options = 0;
 
-	switch (io.opcode) {
-	case nvme_obj_cmd_write:
-		ret = nvme_submit_obj_cmd_write(ns, io.obj_id, addr, length, offset);
-		break;
-	case nvme_obj_cmd_read:
-		ret = nvme_submit_obj_cmd_read(ns, io.obj_id, addr, &length, offset);
-		break;
-	case nvme_obj_cmd_delete:
-		nvme_submit_obj_cmd_delete(ns, io.obj_id);
-		ret = 0;
-		break;
-	case nvme_obj_cmd_list:
-		ret =  nvme_submit_obj_cmd_list(ns, addr, &length, offset);
-		break;
-	default:
-		ret =  -EINVAL;
+	ret = nvme_submit_user_cmd(ns->queue, &c,
+		(void __user *)(uintptr_t)io.addr, length,
+		NULL, 0, 0, &result, 0);
+	if (ret < 0) {
+		pr_err("Ret is %d\n", ret);
+		return ret;
 	}
-	mutex_unlock(&ns->obj_mutex);
 
 	// Copy to user if needed
 	switch (io.opcode) {
-	case nvme_obj_cmd_read:
-	case nvme_obj_cmd_list:
-		io.length = length;
+	case nvme_kv_retrieve:
+	case nvme_kv_list:
+		io.length = result;
 		if (copy_to_user(uio, &io, sizeof(io)))
 			return -EFAULT;
+		break;
 	}
 
 	return ret;
@@ -563,8 +461,6 @@ static void nvme_put_ns_head(struct nvme_ns_head *head)
 static void nvme_free_ns(struct kref *kref)
 {
 	struct nvme_ns *ns = container_of(kref, struct nvme_ns, kref);
-
-	nvme_submit_obj_cmd_delete(ns, NULL);
 
 	if (ns->ndev)
 		nvme_nvm_unregister(ns);
@@ -3399,9 +3295,6 @@ static void nvme_alloc_ns(struct nvme_ctrl *ctrl, unsigned nsid)
 	nvme_mpath_add_disk(ns, id);
 	nvme_fault_inject_init(ns);
 	kfree(id);
-
-	INIT_LIST_HEAD(&ns->fs_objects);
-	mutex_init(&ns->obj_mutex);
 
 	return;
  out_put_disk:
