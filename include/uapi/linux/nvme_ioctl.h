@@ -78,7 +78,7 @@ struct nvme_user_obj_io {
 			__u64 key_high;
 		};
 	};
-
+	__u8 key_len;
 };
 
 #define NVME_IOCTL_ID		_IO('N', 0x40)
