@@ -418,6 +418,7 @@ static int nvme_submit_obj_io(struct nvme_ns *ns,
 	c.kv.value_size = cpu_to_le32(length);
 	c.kv.key_length = 16;
 	c.kv.options = 0;
+	c.kv.offset = io.offset;
 
 	ret = nvme_submit_user_cmd(ns->queue, &c,
 		(void __user *)(uintptr_t)io.addr, length,
@@ -430,6 +431,10 @@ static int nvme_submit_obj_io(struct nvme_ns *ns,
 	// Copy to user if needed
 	switch (io.opcode) {
 	case nvme_kv_retrieve:
+		io.length = min((u64)result, length);
+		if (copy_to_user(uio, &io, sizeof(io)))
+			return -EFAULT;
+		break;
 	case nvme_kv_list:
 		io.length = result;
 		if (copy_to_user(uio, &io, sizeof(io)))
