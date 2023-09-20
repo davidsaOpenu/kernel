@@ -702,7 +702,8 @@ struct nvme_kv_command {
 	__u8			key_length;
 	__u8			options; // Relevent only to store/retreive
 	__u16			rsvd11;
-	__u32			rsvd12[2];
+	__le32			offset;  // Relevent only to retreive. Out of spec, used to read from some offset
+	__u32			rsvd13;
 	__u64			key_high;
 };
 
