@@ -61,6 +61,7 @@ enum nvme_kv_opcode {
 	nvme_kv_retrieve  = 0x02,
 	nvme_kv_list	  = 0x06,
 	nvme_kv_delete	  = 0x10,
+	nvme_kv_exist	  = 0x14,
 };
 
 #define NVME_OBJ_ID_MAXLEN	16
@@ -68,9 +69,8 @@ enum nvme_kv_opcode {
 struct nvme_user_obj_io {
 	__u8	opcode;
 	__u64   offset;
-	__u64	length; // in/out
+	__u32	length; // in/out
 	__u64	addr;
-
 	union {
 		__u8 key[NVME_OBJ_ID_MAXLEN];
 		struct {
@@ -78,7 +78,7 @@ struct nvme_user_obj_io {
 			__u64 key_high;
 		};
 	};
-
+	__u8	key_len;
 };
 
 #define NVME_IOCTL_ID		_IO('N', 0x40)
