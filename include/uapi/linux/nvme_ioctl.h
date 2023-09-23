@@ -61,6 +61,7 @@ enum nvme_kv_opcode {
 	nvme_kv_retrieve  = 0x02,
 	nvme_kv_list	  = 0x06,
 	nvme_kv_delete	  = 0x10,
+	nvme_kv_exist	  = 0x14,
 };
 
 #define NVME_OBJ_ID_MAXLEN	16

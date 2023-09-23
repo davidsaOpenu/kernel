@@ -419,7 +419,6 @@ static int nvme_submit_obj_io(struct nvme_ns *ns,
 	c.kv.key_length = io.key_len;
 	c.kv.options = 0;
 	c.kv.offset = cpu_to_le32(io.offset);
-
 	ret = nvme_submit_user_cmd(ns->queue, &c,
 		(void __user *)(uintptr_t)io.addr, length,
 		NULL, 0, 0, &result, 0);
@@ -436,6 +435,11 @@ static int nvme_submit_obj_io(struct nvme_ns *ns,
 			return -EFAULT;
 		break;
 	case nvme_kv_list:
+		io.length = result;
+		if (copy_to_user(uio, &io, sizeof(io)))
+			return -EFAULT;
+		break;
+	case nvme_kv_exist:
 		io.length = result;
 		if (copy_to_user(uio, &io, sizeof(io)))
 			return -EFAULT;
