@@ -566,7 +566,8 @@ static int __alloc_dev_table(struct exofs_sb_info *sbi, unsigned numdevs,
 	}
 
 	/* Start of allocated struct exofs_dev entries */
-	*peds = eds = (void *)sbi->oc.ods[numores];
+	eds = (void *)(&(sbi->oc.ods[numores]));
+	*peds = eds;
 	/* Initialize pointers into struct exofs_dev */
 	for (i = 0; i < numdevs; ++i)
 		sbi->oc.ods[i] = &eds[i].ored;
