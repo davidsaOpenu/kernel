@@ -3,6 +3,10 @@
 # Makefile for the x86 low level entry code
 #
 
+CFLAGS_entry_64_compat.o += -v
+CFLAGS_syscall_64.o += -Wno-override-init -v
+CFLAGS_syscall_32.o += -Wno-override-init -v
+
 OBJECT_FILES_NON_STANDARD_entry_64_compat.o := y
 
 CFLAGS_syscall_64.o		+= $(call cc-option,-Wno-override-init,)
