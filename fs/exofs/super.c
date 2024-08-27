@@ -39,6 +39,8 @@
 #include <linux/exportfs.h>
 #include <linux/slab.h>
 #include <linux/iversion.h>
+#include <linux/nvme_ioctl.h>
+#include <linux/nvme.h>
 
 #include "exofs.h"
 
@@ -227,40 +229,86 @@ void exofs_make_credential(u8 cred_a[OSD_CAP_LEN], const struct osd_obj_id *obj)
 	osd_sec_init_nosec_doall_caps(cred_a, obj, false, true);
 }
 
-static int exofs_read_kern(struct osd_dev *od, u8 *cred, struct osd_obj_id *obj,
-		    u64 offset, void *p, unsigned length)
+extern int nvme_submit_key_value_cmd(const char *dev,
+	u8 opcode, u64 key_low, u64 key_high, u8 key_length,
+	u32 offset, void *buffer, unsigned *bufflen);
+
+static int nvme_obj_read(uint64_t key, void **buffer, uint32_t *length)
 {
-	struct osd_request *or = osd_start_request(od);
-/*	struct osd_sense_info osi = {.key = 0};*/
 	int ret;
 
-	if (unlikely(!or)) {
-		EXOFS_DBGMSG("%s: osd_start_request failed.\n", __func__);
+	if (!buffer || !length) {
+		pr_err("Invalid null pointer.\n");
+		return -EINVAL;
+	}
+
+	// uint32_t size = *length ;
+	*buffer = kzalloc(*length, GFP_KERNEL);
+	if (!*buffer) {
+		pr_err("Failed to allocate memory for NVMe read request.\n");
 		return -ENOMEM;
 	}
-	ret = osd_req_read_kern(or, obj, offset, p, length);
-	if (unlikely(ret)) {
-		EXOFS_DBGMSG("%s: osd_req_read_kern failed.\n", __func__);
-		goto out;
+
+	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_retrieve,
+		key, 0, 16, 0, (void *)(uintptr_t)*buffer, length);
+	if (ret != 0) {
+		kfree(*buffer);
+        *buffer = NULL;
+		pr_err("nvme_submit_key_value_cmd failed with error %d\n", ret);
+		return ret;
 	}
 
-	ret = osd_finalize_request(or, 0, cred, NULL);
-	if (unlikely(ret)) {
-		EXOFS_DBGMSG("Failed to osd_finalize_request() => %d\n", ret);
-		goto out;
+	return 0;
+}
+
+static int nvme_obj_write(struct block_device *bdev, uint64_t key, const void *buffer, uint32_t length)
+{
+	void *data = NULL;
+	int ret;
+
+	if (length && !buffer) {
+		pr_err("Invalid null pointer.\n");
+		return -EINVAL;
 	}
 
-	ret = osd_execute_request(or);
-	if (unlikely(ret))
-		EXOFS_DBGMSG("osd_execute_request() => %d\n", ret);
-	/* osd_req_decode_sense(or, ret); */
+	if (length) {
+		data = kzalloc(length, GFP_KERNEL);
+		if (!data) {
+			pr_err("Failed to allocate memory for NVMe write request.\n");
+			return -ENOMEM;
+		}
+		memcpy(data, buffer, length);
+	}
 
-out:
-	osd_end_request(or);
-	EXOFS_DBGMSG2("read_kern(0x%llx) offset=0x%llx "
-		      "length=0x%llx dev=%p ret=>%d\n",
-		      _LLU(obj->id), _LLU(offset), _LLU(length), od, ret);
-	return ret;
+	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_store,
+		key, 0, 16, 0, (void *)(uintptr_t)data, &length);
+
+	if (data)
+		kfree(data);
+
+	if (ret != 0) {
+		pr_err("nvme_submit_key_value_cmd failed with error %d\n", ret);
+		return ret;
+	}
+
+	return 0;
+}
+
+static int nvme_obj_create(struct block_device *bdev, uint64_t key)
+{
+	return nvme_obj_write(bdev, key, NULL, 0);
+}
+
+static int exofs_read_kern(struct osd_dev *od, u8 *cred, struct osd_obj_id *obj,
+			u64 offset, void **p, unsigned length)
+{
+	int r = nvme_obj_read(obj->id, p, &length);
+	if (r) {
+		EXOFS_DBGMSG("%s: nvme_obj_read failed.\n", __func__);
+		return -1;
+	}
+
+	return 0;
 }
 
 static const struct osd_attr g_attr_sb_stats = ATTR_DEF(
@@ -586,20 +634,13 @@ static int exofs_read_lookup_dev_table(struct exofs_sb_info *sbi,
 	unsigned numdevs, i;
 	int ret;
 
-	dt = kmalloc(table_bytes, GFP_KERNEL);
-	if (unlikely(!dt)) {
-		EXOFS_ERR("ERROR: allocating %x bytes for device table\n",
-			  table_bytes);
-		return -ENOMEM;
-	}
-
 	sbi->oc.numdevs = 0;
 
 	comp.obj.partition = sbi->one_comp.obj.partition;
 	comp.obj.id = EXOFS_DEVTABLE_ID;
 	exofs_make_credential(comp.cred, &comp.obj);
 
-	ret = exofs_read_kern(fscb_od, comp.cred, &comp.obj, 0, dt,
+	ret = exofs_read_kern(fscb_od, comp.cred, &comp.obj, 0, &dt,
 			      table_bytes);
 	if (unlikely(ret)) {
 		EXOFS_ERR("ERROR: reading device table\n");
@@ -635,7 +676,7 @@ static int exofs_read_lookup_dev_table(struct exofs_sb_info *sbi,
 	exofs_sysfs_sb_add(sbi, &dt->dt_dev_table[0]);
 
 	for (i = 0; i < numdevs; i++) {
-		struct exofs_fscb fscb;
+		struct exofs_fscb *fscb;
 		struct osd_dev_info odi;
 		struct osd_dev *od;
 
@@ -678,7 +719,8 @@ static int exofs_read_lookup_dev_table(struct exofs_sb_info *sbi,
 		 * partition is there.
 		 */
 		ret = exofs_read_kern(od, comp.cred, &comp.obj, 0, &fscb,
-				      sizeof(fscb));
+					  sizeof(*fscb));
+		kfree(fscb);
 		if (unlikely(ret)) {
 			EXOFS_ERR("ERROR: Malformed participating device "
 				  "error reading fscb osd_name-%s\n",
@@ -713,7 +755,8 @@ static int exofs_fill_super(struct super_block *sb,
 {
 	struct inode *root;
 	struct osd_dev *od;		/* Master device                 */
-	struct exofs_fscb fscb;		/*on-disk superblock info        */
+	struct exofs_fscb *fscb;		/*on-disk superblock info        */
+
 	struct ore_comp comp;
 	unsigned table_count;
 	int ret;
@@ -728,11 +771,9 @@ static int exofs_fill_super(struct super_block *sb,
 		kfree(opts->dev_name);
 		opts->dev_name = NULL;
 	} else {
+		// [openu] TODO: we might want to delete this line later.
+		// we don't want to use the osd device for mounting
 		od = osduld_path_lookup(opts->dev_name);
-	}
-	if (IS_ERR(od)) {
-		ret = -EINVAL;
-		goto free_sbi;
 	}
 
 	/* Default layout in case we do not have a device-table */
@@ -764,14 +805,14 @@ static int exofs_fill_super(struct super_block *sb,
 	comp.obj.id = EXOFS_SUPER_ID;
 	exofs_make_credential(comp.cred, &comp.obj);
 
-	ret = exofs_read_kern(od, comp.cred, &comp.obj, 0, &fscb, sizeof(fscb));
+	ret = exofs_read_kern(od, comp.cred, &comp.obj, 0, &fscb, sizeof(*fscb));
 	if (unlikely(ret))
 		goto free_sbi;
 
-	sb->s_magic = le16_to_cpu(fscb.s_magic);
+	sb->s_magic = le16_to_cpu(fscb->s_magic);
 	/* NOTE: we read below to be backward compatible with old versions */
-	sbi->s_nextid = le64_to_cpu(fscb.s_nextid);
-	sbi->s_numfiles = le32_to_cpu(fscb.s_numfiles);
+	sbi->s_nextid = le64_to_cpu(fscb->s_nextid);
+	sbi->s_numfiles = le32_to_cpu(fscb->s_numfiles);
 
 	/* make sure what we read from the object store is correct */
 	if (sb->s_magic != EXOFS_SUPER_MAGIC) {
@@ -780,9 +821,9 @@ static int exofs_fill_super(struct super_block *sb,
 		ret = -EINVAL;
 		goto free_sbi;
 	}
-	if (le32_to_cpu(fscb.s_version) > EXOFS_FSCB_VER) {
+	if (le32_to_cpu(fscb->s_version) > EXOFS_FSCB_VER) {
 		EXOFS_ERR("ERROR: Bad FSCB version expected-%d got-%d\n",
-			  EXOFS_FSCB_VER, le32_to_cpu(fscb.s_version));
+			  EXOFS_FSCB_VER, le32_to_cpu(fscb->s_version));
 		ret = -EINVAL;
 		goto free_sbi;
 	}
@@ -791,7 +832,8 @@ static int exofs_fill_super(struct super_block *sb,
 	get_random_bytes(&sbi->s_next_generation, sizeof(u32));
 	spin_lock_init(&sbi->s_next_gen_lock);
 
-	table_count = le64_to_cpu(fscb.s_dev_table_count);
+	table_count = le64_to_cpu(fscb->s_dev_table_count);
+
 	if (table_count) {
 		ret = exofs_read_lookup_dev_table(sbi, od, table_count);
 		if (unlikely(ret))
@@ -807,6 +849,7 @@ static int exofs_fill_super(struct super_block *sb,
 		sbi->oc.numdevs = 1;
 	}
 
+	// [openu] TODO: understand if really need to call this function
 	__sbi_read_stats(sbi);
 
 	/* set up operation vectors */
@@ -819,6 +862,7 @@ static int exofs_fill_super(struct super_block *sb,
 	sb->s_fs_info = sbi;
 	sb->s_op = &exofs_sops;
 	sb->s_export_op = &exofs_export_ops;
+	// [openu] TODO: need to make it read the inode using nvme
 	root = exofs_iget(sb, EXOFS_ROOT_ID - EXOFS_OBJ_OFF);
 	if (IS_ERR(root)) {
 		EXOFS_ERR("ERROR: exofs_iget failed\n");
