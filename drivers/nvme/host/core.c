@@ -855,6 +855,60 @@ int __nvme_submit_sync_cmd(struct request_queue *q, struct nvme_command *cmd,
 }
 EXPORT_SYMBOL_GPL(__nvme_submit_sync_cmd);
 
+int nvme_submit_key_value_cmd(const char *dev, u8 opcode, u64 key_low,
+	u64 key_high, u8 key_length, u32 offset, void *buffer, u32 *bufflen)
+{
+	struct nvme_command cmd;
+	int ret;
+	struct nvme_ns *ns;
+	union nvme_result result;
+	struct block_device *bdev;
+
+	bdev = blkdev_get_by_path(dev,
+		FMODE_READ | FMODE_WRITE, NULL);
+	if (IS_ERR(bdev)) {
+		pr_err("Failed to open block device: %ld\n", PTR_ERR(bdev));
+		return -1;
+	}
+
+	ns = (struct nvme_ns *)(bdev->bd_disk->private_data);
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.kv.opcode = opcode;
+	cmd.kv.key_low = key_low;
+	cmd.kv.key_high = key_high;
+	cmd.kv.value_size = cpu_to_le32(*bufflen);
+	cmd.kv.key_length = key_length;
+	cmd.kv.offset = cpu_to_le32(offset);
+	cmd.kv.nsid = cpu_to_le32(ns->head->ns_id);
+
+	ret = __nvme_submit_sync_cmd(ns->queue, &cmd, &result,
+		buffer, *bufflen, 0, NVME_QID_ANY, 0, 0, false);
+	if (ret != 0) {
+		blkdev_put(bdev, FMODE_READ | FMODE_WRITE);
+		pr_err("__nvme_submit_sync_cmd failed with error %d\n", ret);
+		return ret;
+	}
+
+	switch (opcode) {
+	case nvme_kv_retrieve:
+		if (result.u32 < *bufflen)
+			*bufflen = result.u32;
+		break;
+	case nvme_kv_list:
+		*bufflen = result.u32;
+		break;
+	case nvme_kv_exist:
+		*bufflen = result.u32;
+		break;
+	}
+
+	blkdev_put(bdev, FMODE_READ | FMODE_WRITE);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(nvme_submit_key_value_cmd);
+
 int nvme_submit_sync_cmd(struct request_queue *q, struct nvme_command *cmd,
 		void *buffer, unsigned bufflen)
 {
