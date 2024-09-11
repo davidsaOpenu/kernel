@@ -24,6 +24,30 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "2a2f5f89_e13cb21d",
+        "filename": ".config",
+        "patchSetId": 2
+      },
+      "lineNbr": 4182,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2024-09-11T06:26:59Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "b2ff418b_df5d6785",
+      "range": {
+        "startLine": 4179,
+        "startChar": 0,
+        "endLine": 4182,
+        "endChar": 17
+      },
+      "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "152994c9_26596a00",
@@ -37,6 +61,30 @@
       "writtenOn": "2024-08-11T06:57:22Z",
       "side": 1,
       "message": "Could you please point out how these are related to ORE/OSD/EXOFS?",
+      "range": {
+        "startLine": 4395,
+        "startChar": 0,
+        "endLine": 4396,
+        "endChar": 27
+      },
+      "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "168913f6_1d02e55c",
+        "filename": ".config",
+        "patchSetId": 2
+      },
+      "lineNbr": 4396,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2024-09-11T06:26:59Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "152994c9_26596a00",
       "range": {
         "startLine": 4395,
         "startChar": 0,
