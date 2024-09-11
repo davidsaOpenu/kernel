@@ -93,6 +93,23 @@
       },
       "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "2cc7b21d_3aaf5c41",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2024-09-11T06:27:22Z",
+      "side": 1,
+      "message": "they were turned on with make nsconfig",
+      "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
