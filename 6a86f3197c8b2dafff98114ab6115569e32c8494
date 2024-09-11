@@ -110,6 +110,23 @@
       "message": "they were turned on with make nsconfig",
       "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "f60a99b1_ce73addd",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2024-09-11T11:26:35Z",
+      "side": 1,
+      "message": "Verified: https://review.gerrithub.io/c/davidsaOpenu/simulator/+/1199207",
+      "revId": "6a86f3197c8b2dafff98114ab6115569e32c8494",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
