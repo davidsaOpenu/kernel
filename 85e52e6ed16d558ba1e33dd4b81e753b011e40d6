@@ -41,6 +41,30 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "b7574369_b0938538",
+        "filename": "drivers/nvme/host/core.c",
+        "patchSetId": 1
+      },
+      "lineNbr": 899,
+      "author": {
+        "id": 1038807
+      },
+      "writtenOn": "2025-07-02T22:38:34Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "2b20f0e4_39ba70e8",
+      "range": {
+        "startLine": 899,
+        "startChar": 20,
+        "endLine": 899,
+        "endChar": 22
+      },
+      "revId": "85e52e6ed16d558ba1e33dd4b81e753b011e40d6",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "65b6e70d_13eac8a2",
@@ -64,6 +88,30 @@
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     },
     {
+      "unresolved": false,
+      "key": {
+        "uuid": "15a17936_b12c9db0",
+        "filename": "drivers/nvme/host/core.c",
+        "patchSetId": 1
+      },
+      "lineNbr": 902,
+      "author": {
+        "id": 1038807
+      },
+      "writtenOn": "2025-07-02T22:38:34Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "65b6e70d_13eac8a2",
+      "range": {
+        "startLine": 902,
+        "startChar": 23,
+        "endLine": 902,
+        "endChar": 24
+      },
+      "revId": "85e52e6ed16d558ba1e33dd4b81e753b011e40d6",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
       "unresolved": true,
       "key": {
         "uuid": "90689917_eb9ab602",
@@ -77,6 +125,24 @@
       "writtenOn": "2025-05-27T18:26:24Z",
       "side": 1,
       "message": "no \"*buffer \u003d NULL;\" yields in this case a potential UAF\n```suggestion\n\t\tkfree(*buffer);\n\t\t*buffer \u003d NULL;\n```",
+      "revId": "85e52e6ed16d558ba1e33dd4b81e753b011e40d6",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "f210dd1b_a9e82726",
+        "filename": "fs/exofs/super.c",
+        "patchSetId": 1
+      },
+      "lineNbr": 255,
+      "author": {
+        "id": 1038807
+      },
+      "writtenOn": "2025-07-02T22:38:34Z",
+      "side": 1,
+      "message": "Done",
+      "parentUuid": "90689917_eb9ab602",
       "revId": "85e52e6ed16d558ba1e33dd4b81e753b011e40d6",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
