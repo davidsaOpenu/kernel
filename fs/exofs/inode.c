@@ -1058,82 +1058,20 @@ static const struct osd_attr g_attr_inode_dir_layout = ATTR_DEF(
 static int exofs_get_inode(struct super_block *sb, struct exofs_i_info *oi,
 		    struct exofs_fcb *inode)
 {
-	struct exofs_sb_info *sbi = sb->s_fs_info;
-	struct osd_attr attrs[] = {
-		[0] = g_attr_inode_data,
-		[1] = g_attr_inode_file_layout,
-		[2] = g_attr_inode_dir_layout,
+	struct osd_obj_id obj = {
+		.partition = oi->one_comp.obj.partition,
+		.id = oi->one_comp.obj.id,
 	};
-	struct ore_io_state *ios;
-	struct exofs_on_disk_inode_layout *layout;
 	int ret;
 
-	ret = ore_get_io_state(&sbi->layout, &oi->oc, &ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("%s: ore_get_io_state failed.\n", __func__);
+	ret = exofs_get_obj_atribiute(&obj, inode);
+	if (ret != 0) {
+		EXOFS_ERR("object(0x%llx) attribute read failed =>%d\n",
+			 _LLU(obj.id), ret);
 		return ret;
 	}
 
-	attrs[1].len = exofs_on_disk_inode_layout_size(sbi->oc.numdevs);
-	attrs[2].len = exofs_on_disk_inode_layout_size(sbi->oc.numdevs);
-
-	ios->in_attr = attrs;
-	ios->in_attr_len = ARRAY_SIZE(attrs);
-
-	ret = ore_read(ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("object(0x%llx) corrupted, return empty file=>%d\n",
-			  _LLU(oi->one_comp.obj.id), ret);
-		memset(inode, 0, sizeof(*inode));
-		inode->i_mode = 0040000 | (0777 & ~022);
-		/* If object is lost on target we might as well enable it's
-		 * delete.
-		 */
-		ret = 0;
-		goto out;
-	}
-
-	ret = extract_attr_from_ios(ios, &attrs[0]);
-	if (ret) {
-		EXOFS_ERR("%s: extract_attr 0 of inode failed\n", __func__);
-		goto out;
-	}
-	WARN_ON(attrs[0].len != EXOFS_INO_ATTR_SIZE);
-	memcpy(inode, attrs[0].val_ptr, EXOFS_INO_ATTR_SIZE);
-
-	ret = extract_attr_from_ios(ios, &attrs[1]);
-	if (ret) {
-		EXOFS_ERR("%s: extract_attr 1 of inode failed\n", __func__);
-		goto out;
-	}
-	if (attrs[1].len) {
-		layout = attrs[1].val_ptr;
-		if (layout->gen_func != cpu_to_le16(LAYOUT_MOVING_WINDOW)) {
-			EXOFS_ERR("%s: unsupported files layout %d\n",
-				__func__, layout->gen_func);
-			ret = -ENOTSUPP;
-			goto out;
-		}
-	}
-
-	ret = extract_attr_from_ios(ios, &attrs[2]);
-	if (ret) {
-		EXOFS_ERR("%s: extract_attr 2 of inode failed\n", __func__);
-		goto out;
-	}
-	if (attrs[2].len) {
-		layout = attrs[2].val_ptr;
-		if (layout->gen_func != cpu_to_le16(LAYOUT_MOVING_WINDOW)) {
-			EXOFS_ERR("%s: unsupported meta-data layout %d\n",
-				__func__, layout->gen_func);
-			ret = -ENOTSUPP;
-			goto out;
-		}
-	}
-
-out:
-	ore_put_io_state(ios);
-	return ret;
+	return 0;
 }
 
 static void __oi_init(struct exofs_i_info *oi)
