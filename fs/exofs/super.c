@@ -45,6 +45,7 @@
 #include "exofs.h"
 
 #define EXOFS_DBGMSG2(M...) do {} while (0)
+#define NVME_ATTR_KEY_HIGH (1ULL << 31)
 
 /******************************************************************************
  * MOUNT OPTIONS
@@ -233,7 +234,9 @@ extern int nvme_submit_key_value_cmd(const char *dev,
 	u8 opcode, u64 key_low, u64 key_high, u8 key_length,
 	u32 offset, void *buffer, unsigned *bufflen);
 
-static int nvme_obj_read(uint64_t key, void **buffer, uint32_t *length)
+/* Attribute-aware NVMe KV helpers */
+static int nvme_kv_read(uint64_t key, bool is_attrib,
+			 void **buffer, uint32_t *length)
 {
 	int ret;
 
@@ -242,73 +245,158 @@ static int nvme_obj_read(uint64_t key, void **buffer, uint32_t *length)
 		return -EINVAL;
 	}
 
-	// uint32_t size = *length ;
 	*buffer = kzalloc(*length, GFP_KERNEL);
-	if (!*buffer) {
-		pr_err("Failed to allocate memory for NVMe read request.\n");
+	if (!*buffer)
 		return -ENOMEM;
-	}
 
+	EXOFS_DBGMSG("nvme_kv_read: key=%llx, is_attrib=%d, length=%d\n", key, is_attrib, *length);
 	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_retrieve,
-		key, 0, 16, 0, (void *)(uintptr_t)*buffer, length);
-	if (ret != 0) {
+		key | (is_attrib ? NVME_ATTR_KEY_HIGH : 0), 0, NVME_OBJ_ID_MAXLEN, 0,
+		(void *)(uintptr_t)*buffer, length);
+	if (ret) {
 		kfree(*buffer);
-        *buffer = NULL;
-		pr_err("nvme_submit_key_value_cmd failed with error %d\n", ret);
+		*buffer = NULL;
 		return ret;
 	}
-
 	return 0;
 }
 
-static int nvme_obj_write(struct block_device *bdev, uint64_t key, const void *buffer, uint32_t length)
+static int nvme_kv_write(uint64_t key, bool is_attrib,
+		  const void *buffer, uint32_t length)
 {
 	void *data = NULL;
 	int ret;
 
-	if (length && !buffer) {
-		pr_err("Invalid null pointer.\n");
+	if (length && !buffer)
 		return -EINVAL;
-	}
 
 	if (length) {
 		data = kzalloc(length, GFP_KERNEL);
-		if (!data) {
-			pr_err("Failed to allocate memory for NVMe write request.\n");
+		if (!data)
 			return -ENOMEM;
-		}
 		memcpy(data, buffer, length);
 	}
 
 	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_store,
-		key, 0, 16, 0, (void *)(uintptr_t)data, &length);
+		key | (is_attrib ? NVME_ATTR_KEY_HIGH : 0), 0, NVME_OBJ_ID_MAXLEN, 0,
+		(void *)(uintptr_t)data, &length);
+	kfree(data);
+	return ret;
+}
 
-	if (data)
-		kfree(data);
+static int nvme_delete(uint64_t key)
+{
+	int ret;
 
-	if (ret != 0) {
-		pr_err("nvme_submit_key_value_cmd failed with error %d\n", ret);
+	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_delete,
+		key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, NULL);
+	return ret;
+}
+
+static int nvme_obj_exists(uint64_t key)
+{
+	int ret;
+
+	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_exist,
+		key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, NULL);
+	return ret;
+}
+
+static int exofs_read_kern(struct osd_obj_id *obj, void **p, unsigned length)
+{
+	/* raw read from start of object, ignore provided offset */
+	int r = nvme_kv_read(obj->id, false, p, &length);
+	if (r) {
+		EXOFS_DBGMSG("%s: nvme_read failed.\n", __func__);
+		return -1;
+	}
+	return 0;
+}
+
+int exofs_get_obj_atribiute(struct osd_obj_id *obj, struct exofs_fcb *fcb)
+{
+	uint32_t len = EXOFS_INO_ATTR_SIZE;
+	void *buf = NULL;
+
+	int ret = nvme_kv_read(obj->id, true, &buf, &len);
+	if (ret) {
+        EXOFS_ERR("nvme_read failed.\n");
 		return ret;
 	}
 
-	return 0;
-}
-
-static int nvme_obj_create(struct block_device *bdev, uint64_t key)
-{
-	return nvme_obj_write(bdev, key, NULL, 0);
-}
-
-static int exofs_read_kern(struct osd_dev *od, u8 *cred, struct osd_obj_id *obj,
-			u64 offset, void **p, unsigned length)
-{
-	int r = nvme_obj_read(obj->id, p, &length);
-	if (r) {
-		EXOFS_DBGMSG("%s: nvme_obj_read failed.\n", __func__);
-		return -1;
+	if (len < EXOFS_INO_ATTR_SIZE) {
+		EXOFS_ERR("len %d < EXOFS_INO_ATTR_SIZE\n", len);
+		kfree(buf);
+		return -EINVAL;
 	}
 
+	memcpy(fcb, buf, sizeof(*fcb));
+	kfree(buf);
 	return 0;
+}
+
+int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length)
+{
+	int ret;
+	uint32_t len = length;
+	void *buf = NULL;
+
+	ret = nvme_kv_read(obj->id, false, &buf, &len);
+	if (ret)
+		return ret;
+
+	/* hand over ownership of the allocated buffer to caller */
+	*p = buf;
+	return 0;
+}
+
+int exofs_delete_obj(struct osd_obj_id *obj) {
+	return nvme_delete(obj->id);
+}
+
+int exofs_update_obj_attribute(struct osd_obj_id *obj, void *p, unsigned length) {
+	/* Write inode attributes into the attribute key (high bit key) */
+	return nvme_kv_write(obj->id, true, p, length);
+}
+// set the attribute of the object
+// if the object exists, get the length of the data, malloc a buffer copy the new attribute and data to the buffer then delete the object and write the buffer back
+// if the object does not exist, just write the new attribute and data back
+int exofs_set_obj_attribute(struct osd_obj_id *obj, void *p, unsigned length) {
+	if (!obj) {
+		EXOFS_ERR("obj is NULL.\n");
+		return -EINVAL;
+	}
+	if (!p && length) {
+		EXOFS_ERR("p is NULL and length is not 0.\n");
+		return -EINVAL;
+	}
+
+	/* Always write attributes through attribute key */
+	return nvme_kv_write(obj->id, true, p, length);
+}
+
+// get the inode attribute update size and write the data back with the new size
+int exofs_set_obj_data(struct osd_obj_id *obj, void *p, unsigned length) {
+	int ret;
+	struct exofs_fcb fcb;
+
+	if (!nvme_obj_exists(obj->id)) {
+		return -ENOENT;
+	}
+
+	ret = exofs_get_obj_atribiute(obj, &fcb);
+	if (ret) {
+		EXOFS_ERR("exofs_get_obj_atribiute failed.\n");
+		return ret;
+	}
+	fcb.i_size = length;
+
+	/* Write data into the data key, then update attributes (size) */
+	ret = nvme_kv_write(obj->id, false, p, length);
+	if (ret)
+		return ret;
+
+	return nvme_kv_write(obj->id, true, &fcb, EXOFS_INO_ATTR_SIZE);
 }
 
 static const struct osd_attr g_attr_sb_stats = ATTR_DEF(
@@ -640,8 +728,7 @@ static int exofs_read_lookup_dev_table(struct exofs_sb_info *sbi,
 	comp.obj.id = EXOFS_DEVTABLE_ID;
 	exofs_make_credential(comp.cred, &comp.obj);
 
-	ret = exofs_read_kern(fscb_od, comp.cred, &comp.obj, 0, &dt,
-			      table_bytes);
+	ret = exofs_read_kern(&comp.obj, (void**)(&dt), table_bytes);
 	if (unlikely(ret)) {
 		EXOFS_ERR("ERROR: reading device table\n");
 		goto out;
@@ -718,8 +805,7 @@ static int exofs_read_lookup_dev_table(struct exofs_sb_info *sbi,
 		/* Read the fscb of the other devices to make sure the FS
 		 * partition is there.
 		 */
-		ret = exofs_read_kern(od, comp.cred, &comp.obj, 0, &fscb,
-					  sizeof(*fscb));
+		ret = exofs_get_obj_data(&comp.obj, (void**)(&fscb), sizeof(*fscb));
 		kfree(fscb);
 		if (unlikely(ret)) {
 			EXOFS_ERR("ERROR: Malformed participating device "
@@ -805,7 +891,7 @@ static int exofs_fill_super(struct super_block *sb,
 	comp.obj.id = EXOFS_SUPER_ID;
 	exofs_make_credential(comp.cred, &comp.obj);
 
-	ret = exofs_read_kern(od, comp.cred, &comp.obj, 0, &fscb, sizeof(*fscb));
+	ret = exofs_read_kern(&comp.obj, (void**)(&fscb), sizeof(*fscb));
 	if (unlikely(ret))
 		goto free_sbi;
 
