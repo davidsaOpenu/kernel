@@ -1,0 +1,61 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f609aa1d_49b040c6",
+        "filename": "/COMMIT_MSG",
+        "patchSetId": 2
+      },
+      "lineNbr": 9,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-09-08T10:13:45Z",
+      "side": 1,
+      "message": "^",
+      "revId": "edfe5c96fbade1ed0f5a47103e4d693a1c132675",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "70308f9b_1151eafd",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 2
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-09-08T10:13:45Z",
+      "side": 1,
+      "message": "still early to change hard-coded /dev/nvme01n1 to a more generic way probably. Lets update the commit message",
+      "revId": "edfe5c96fbade1ed0f5a47103e4d693a1c132675",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "5d93f5c6_f6e8559f",
+        "filename": "fs/exofs/super.c",
+        "patchSetId": 2
+      },
+      "lineNbr": 254,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-09-08T10:13:45Z",
+      "side": 1,
+      "message": "not too much left to add several disks.  Adding @rlmk1997@gmail.com @rlmk1997@gmail.com as  reviewers to https://review.gerrithub.io/c/davidsaOpenu/simulator/+/1219788",
+      "range": {
+        "startLine": 254,
+        "startChar": 34,
+        "endLine": 254,
+        "endChar": 46
+      },
+      "revId": "edfe5c96fbade1ed0f5a47103e4d693a1c132675",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
