@@ -1,0 +1,27 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "58844038_bc70f7a1",
+        "filename": "/COMMIT_MSG",
+        "patchSetId": 4
+      },
+      "lineNbr": 9,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-09-09T07:49:48Z",
+      "side": 1,
+      "message": "let\u0027s specify wheere from they called and which osd api methods were replaced. \n\nAlso let\u0027s replace mount fully works with describing what works in mount rigorously. And same for open. \n\nAnd last things are existing tests testing the to be described funcitonality in a full manner or should https://review.gerrithub.io/c/davidsaOpenu/simulator/+/1221316 be updated with additional tests?",
+      "range": {
+        "startLine": 9,
+        "startChar": 0,
+        "endLine": 9,
+        "endChar": 20
+      },
+      "revId": "9f3c7e764cb0266ade69cc19bb957180203c61b3",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
