@@ -22,6 +22,30 @@
       },
       "revId": "9f3c7e764cb0266ade69cc19bb957180203c61b3",
       "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    },
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "f44f44f9_d133ec5a",
+        "filename": "/COMMIT_MSG",
+        "patchSetId": 4
+      },
+      "lineNbr": 9,
+      "author": {
+        "id": 1038807
+      },
+      "writtenOn": "2025-09-09T11:26:06Z",
+      "side": 1,
+      "message": "Edited the commit.\nCurrent tests cover these additions with the test that validates that the mount was indeed mounted.",
+      "parentUuid": "58844038_bc70f7a1",
+      "range": {
+        "startLine": 9,
+        "startChar": 0,
+        "endLine": 9,
+        "endChar": 20
+      },
+      "revId": "9f3c7e764cb0266ade69cc19bb957180203c61b3",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
     }
   ]
 }
