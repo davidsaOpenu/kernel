@@ -35,14 +35,18 @@
 
 static inline int exofs_add_nondir(struct dentry *dentry, struct inode *inode)
 {
+	EXOFS_ERR("exofs_add_nondir: exofs_add_link started with inode=%lx\n", inode->i_ino);
 	int err = exofs_add_link(dentry, inode);
 	if (!err) {
+		EXOFS_ERR("exofs_add_nondir: exofs_add_link ended with inode=%lx, err=%d\n", inode->i_ino, err);
 		d_instantiate(dentry, inode);
 		return 0;
 	}
 	inode_dec_link_count(inode);
+	EXOFS_ERR("exofs_add_nondir: iput started with inode=%lx\n", inode->i_ino);
 	iput(inode);
-	return err;
+	EXOFS_ERR("exofs_add_nondir: iput ended with inode=%lx\n", inode->i_ino);
+	return err;	
 }
 
 static struct dentry *exofs_lookup(struct inode *dir, struct dentry *dentry,
@@ -64,6 +68,7 @@ static int exofs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 {
 	struct inode *inode = exofs_new_inode(dir, mode);
 	int err = PTR_ERR(inode);
+	EXOFS_ERR("exofs_create: exofs_new_inode ended with inode=%p, err=%d\n", inode, err);
 	if (!IS_ERR(inode)) {
 		inode->i_op = &exofs_file_inode_operations;
 		inode->i_fop = &exofs_file_operations;
@@ -71,6 +76,9 @@ static int exofs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 		mark_inode_dirty(inode);
 		err = exofs_add_nondir(dentry, inode);
 	}
+
+	EXOFS_ERR("exofs_create: exofs_add_nondir ended with inode=%p, err=%d\n", inode, err);
+
 	return err;
 }
 

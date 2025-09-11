@@ -307,67 +307,89 @@ static int _maybe_not_all_in_one_io(struct ore_io_state *ios,
 
 static int read_exec(struct page_collect *pcol)
 {
+	struct osd_obj_id obj;
 	struct exofs_i_info *oi = exofs_i(pcol->inode);
-	struct ore_io_state *ios;
-	struct page_collect *pcol_copy = NULL;
-	int ret;
+	struct exofs_fcb fcb;
+	void *buf = NULL;
+	u64 file_size;
+	u64 offset;
+	u64 need;
+	u64 copied = 0;
+	unsigned i;
+	int ret = 0;
 
 	if (!pcol->pages)
 		return 0;
 
-	if (!pcol->ios) {
-		int ret = ore_get_rw_state(&pcol->sbi->layout, &oi->oc, true,
-					     pcol->pg_first << PAGE_SHIFT,
-					     pcol->length, &pcol->ios);
+	/* Build object identifier for NVMe KV backend */
+	obj.partition = pcol->sbi->one_comp.obj.partition;
+	obj.id = exofs_oi_objno(oi);
 
-		if (ret)
+	/* Get current inode attributes (for size) */
+	ret = exofs_get_obj_atribiute(&obj, &fcb);
+	if (ret) {
+		_unlock_pcol_pages(pcol, ret, READ);
+		pcol_free(pcol);
+		return ret;
+	}
+
+	file_size = le64_to_cpu(fcb.i_size);
+	offset = (u64)pcol->pg_first << PAGE_SHIFT;
+
+	if (offset >= file_size) {
+		/* Nothing to read. Pages were already handled by caller. */
+		for (i = 0; i < pcol->nr_pages; i++) {
+			struct page *page = pcol->pages[i];
+			update_read_page(page, 0);
+			if (!pcol->read_4_write)
+				unlock_page(page);
+		}
+		pcol_free(pcol);
+		return 0;
+	}
+
+	/* Clamp length to EOF */
+	need = pcol->length;
+	if (need > file_size - offset)
+		need = file_size - offset;
+
+	/* Backend currently reads from start: fetch up to offset + need */
+	if (offset + need) {
+		ret = exofs_get_obj_data(&obj, &buf, (unsigned)(offset + need));
+		if (ret) {
+			_unlock_pcol_pages(pcol, ret, READ);
+			pcol_free(pcol);
 			return ret;
+		}
 	}
 
-	ios = pcol->ios;
-	ios->pages = pcol->pages;
+	for (i = 0; i < pcol->nr_pages; i++) {
+		struct page *page = pcol->pages[i];
+		size_t chunk;
 
-	if (pcol->read_4_write) {
-		ore_read(pcol->ios);
-		return __readpages_done(pcol);
+		if (copied >= need)
+			chunk = 0;
+		else {
+			u64 remain = need - copied;
+			chunk = remain > PAGE_SIZE ? PAGE_SIZE : (size_t)remain;
+		}
+
+		if (chunk) {
+			void *kaddr = kmap_atomic(page);
+			memcpy(kaddr, (char *)buf + offset + copied, chunk);
+			kunmap_atomic(kaddr);
+		}
+
+		ret = update_read_page(page, 0);
+		if (!pcol->read_4_write)
+			unlock_page(page);
+
+		copied += chunk;
 	}
 
-	pcol_copy = kmalloc(sizeof(*pcol_copy), GFP_KERNEL);
-	if (!pcol_copy) {
-		ret = -ENOMEM;
-		goto err;
-	}
-
-	*pcol_copy = *pcol;
-	ios->done = readpages_done;
-	ios->private = pcol_copy;
-
-	/* pages ownership was passed to pcol_copy */
-	_pcol_reset(pcol);
-
-	ret = _maybe_not_all_in_one_io(ios, pcol_copy, pcol);
-	if (unlikely(ret))
-		goto err;
-
-	EXOFS_DBGMSG2("read_exec(0x%lx) offset=0x%llx length=0x%llx\n",
-		pcol->inode->i_ino, _LLU(ios->offset), _LLU(ios->length));
-
-	ret = ore_read(ios);
-	if (unlikely(ret))
-		goto err;
-
-	atomic_inc(&pcol->sbi->s_curr_pending);
-
+	kfree(buf);
+	pcol_free(pcol);
 	return 0;
-
-err:
-	if (!pcol_copy) /* Failed before ownership transfer */
-		pcol_copy = pcol;
-	_unlock_pcol_pages(pcol_copy, ret, READ);
-	pcol_free(pcol_copy);
-	kfree(pcol_copy);
-
-	return ret;
 }
 
 /* readpage_strip is called either directly from readpage() or by the VFS from
@@ -1018,7 +1040,7 @@ int exofs_setattr(struct dentry *dentry, struct iattr *iattr)
 {
 	struct inode *inode = d_inode(dentry);
 	int error;
-
+	EXOFS_ERR("exofs_setattr: called on %pd\n", dentry);
 	/* if we are about to modify an object, and it hasn't been
 	 * created yet, wait
 	 */
@@ -1227,52 +1249,79 @@ struct inode *exofs_new_inode(struct inode *dir, umode_t mode)
 	struct super_block *sb = dir->i_sb;
 	struct exofs_sb_info *sbi = sb->s_fs_info;
 	struct inode *inode;
-	struct exofs_i_info *oi;
-	struct ore_io_state *ios;
+	struct osd_obj_id obj;
+	struct exofs_fcb fcb;
+
+	// struct exofs_i_info *oi;
+	// struct ore_io_state *ios;
 	int ret;
 
 	inode = new_inode(sb);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
 
-	oi = exofs_i(inode);
-	__oi_init(oi);
+	// oi = exofs_i(inode);
+	//__oi_init(oi);
 
-	set_obj_2bcreated(oi);
+	// set_obj_2bcreated(oi);
 
 	inode_init_owner(inode, dir, mode);
-	inode->i_ino = sbi->s_nextid++;
+	inode->i_ino = sbi->s_nextid++ + EXOFS_OBJ_OFF;
 	inode->i_blkbits = EXOFS_BLKSHIFT;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
-	oi->i_commit_size = inode->i_size = 0;
+	// oi->i_commit_size = inode->i_size = 0;
 	spin_lock(&sbi->s_next_gen_lock);
 	inode->i_generation = sbi->s_next_generation++;
 	spin_unlock(&sbi->s_next_gen_lock);
 	insert_inode_hash(inode);
 
-	exofs_init_comps(&oi->oc, &oi->one_comp, sb->s_fs_info,
-			 exofs_oi_objno(oi));
+	// exofs_init_comps(&oi->oc, &oi->one_comp, sb->s_fs_info,
+	// 		 exofs_oi_objno(oi));
 	exofs_sbi_write_stats(sbi); /* Make sure new sbi->s_nextid is on disk */
 
 	mark_inode_dirty(inode);
+	EXOFS_ERR("exofs_new_inode: removed all logic\n");
 
-	ret = ore_get_io_state(&sbi->layout, &oi->oc, &ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("exofs_new_inode: ore_get_io_state failed\n");
-		return ERR_PTR(ret);
-	}
+	// write inode logic using the nvme obj set attribute
+	memset(&fcb, 0, sizeof(fcb));
+	fcb.i_mode = cpu_to_le16(inode->i_mode);
+	fcb.i_uid = cpu_to_le32(i_uid_read(inode));
+	fcb.i_gid = cpu_to_le32(i_gid_read(inode));
+	fcb.i_links_count = cpu_to_le16(inode->i_nlink);
+	fcb.i_ctime = cpu_to_le32(inode->i_ctime.tv_sec);
+	fcb.i_atime = cpu_to_le32(inode->i_atime.tv_sec);
+	fcb.i_mtime = cpu_to_le32(inode->i_mtime.tv_sec);
+	fcb.i_size = cpu_to_le64(inode->i_size);
+	fcb.i_generation = cpu_to_le32(inode->i_generation);
+	obj.id = inode->i_ino;
+	obj.partition = sbi->one_comp.obj.partition;
 
-	ios->done = create_done;
-	ios->private = inode;
-
-	ret = ore_create(ios);
+	ret = exofs_set_obj_attribute(&obj, &fcb, sizeof(fcb));
 	if (ret) {
-		ore_put_io_state(ios);
+		EXOFS_ERR("exofs_new_inode: exofs_set_obj_attribute failed inode=%lx ret=%d\n", inode->i_ino, ret);
 		return ERR_PTR(ret);
 	}
-	atomic_inc(&sbi->s_curr_pending);
+	EXOFS_ERR("exofs_new_inode: create inode=%lx\n", inode->i_ino);
 
 	return inode;
+
+	
+	//  ret = ore_get_io_state(&sbi->layout, &oi->oc, &ios);
+	//  if (unlikely(ret)) {
+		//  EXOFS_ERR("exofs_new_inode: ore_get_io_state failed\n");
+		//  return ERR_PTR(ret);
+	//  }
+
+	// ios->done = create_done;
+	// ios->private = inode;
+
+	// ret = ore_create(ios);
+	// if (ret) {
+	// 	ore_put_io_state(ios);
+	// 	return ERR_PTR(ret);
+	// }
+	// atomic_inc(&sbi->s_curr_pending);
+	// return inode;
 }
 
 /*
@@ -1356,6 +1405,7 @@ static int exofs_update_inode(struct inode *inode, int do_sync)
 	ios->out_attr_len = 1;
 	ios->out_attr = &attr;
 
+	EXOFS_ERR("exofs_update_inode: wait_obj_created %lx\n", inode->i_ino);
 	wait_obj_created(oi);
 
 	if (!do_sync) {
@@ -1411,6 +1461,7 @@ void exofs_evict_inode(struct inode *inode)
 	struct ore_io_state *ios;
 	int ret;
 
+	EXOFS_ERR("exofs_evict_inode: called on %lx\n", inode->i_ino);
 	truncate_inode_pages_final(&inode->i_data);
 
 	/* TODO: should do better here */

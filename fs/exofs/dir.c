@@ -159,10 +159,11 @@ static struct page *exofs_get_page(struct inode *dir, unsigned long n)
 {
 	struct address_space *mapping = dir->i_mapping;
 	struct page *page = read_mapping_page(mapping, n, NULL);
-
+	EXOFS_ERR("exofs_get_page: page %p\n", page);
 	if (!IS_ERR(page)) {
 		kmap(page);
 		if (unlikely(!PageChecked(page))) {
+			EXOFS_ERR("exofs_get_page: PageChecked(page) is false\n");
 			if (PageError(page) || !exofs_check_page(page))
 				goto fail;
 		}
@@ -438,13 +439,19 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 	loff_t pos;
 	int err;
 
+	EXOFS_ERR("exofs_add_link: name %s, namelen %u\n", name, namelen);
+
 	for (n = 0; n <= npages; n++) {
 		char *dir_end;
 
 		page = exofs_get_page(dir, n);
+		EXOFS_ERR("exofs_add_link: page %p\n", page);
 		err = PTR_ERR(page);
 		if (IS_ERR(page))
 			goto out;
+
+		EXOFS_ERR("exofs_add_link: page locked\n");
+
 		lock_page(page);
 		kaddr = page_address(page);
 		dir_end = kaddr + exofs_last_byte(dir, n);
@@ -452,6 +459,7 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 		kaddr += PAGE_SIZE - reclen;
 		while ((char *)de <= kaddr) {
 			if ((char *)de == dir_end) {
+				EXOFS_ERR("exofs_add_link: dir_end\n");
 				name_len = 0;
 				rec_len = chunk_size;
 				de->rec_len = cpu_to_le16(chunk_size);
@@ -466,11 +474,17 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 				goto out_unlock;
 			}
 			err = -EEXIST;
-			if (exofs_match(namelen, name, de))
+			if (exofs_match(namelen, name, de)) {
+				EXOFS_ERR("exofs_add_link: match\n");
 				goto out_unlock;
+			}
+
 			name_len = EXOFS_DIR_REC_LEN(de->name_len);
 			rec_len = le16_to_cpu(de->rec_len);
-			if (!de->inode_no && rec_len >= reclen)
+			if (!de->inode_no && rec_len >= reclen) {
+				EXOFS_ERR("exofs_add_link: rec_len >= reclen\n");
+				goto got_it;
+			}
 				goto got_it;
 			if (rec_len >= name_len + reclen)
 				goto got_it;
@@ -487,8 +501,10 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 got_it:
 	pos = page_offset(page) +
 		(char *)de - (char *)page_address(page);
+	EXOFS_ERR("exofs_add_link: pos %lld\n", pos);
 	err = exofs_write_begin(NULL, page->mapping, pos, rec_len, 0,
 							&page, NULL);
+	EXOFS_ERR("exofs_add_link: err %d\n", err);
 	if (err)
 		goto out_unlock;
 	if (de->inode_no) {

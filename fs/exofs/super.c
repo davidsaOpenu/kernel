@@ -287,9 +287,11 @@ static int nvme_kv_write(uint64_t key, bool is_attrib,
 static int nvme_delete(uint64_t key)
 {
 	int ret;
-
+	char data[10] = {0};
+	uint32_t length = 0;
+	
 	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_delete,
-		key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, NULL);
+		key, 0, NVME_OBJ_ID_MAXLEN, 0, data, &length);
 	return ret;
 }
 
@@ -297,8 +299,11 @@ static int nvme_obj_exists(uint64_t key)
 {
 	int ret;
 
+	char data[10] = {0};
+	uint32_t length = 0;
+
 	ret = nvme_submit_key_value_cmd("/dev/nvme0n1", nvme_kv_exist,
-		key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, NULL);
+		key, 0, NVME_OBJ_ID_MAXLEN, 0, data, &length);
 	return ret;
 }
 
@@ -351,6 +356,12 @@ int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length)
 }
 
 int exofs_delete_obj(struct osd_obj_id *obj) {
+	if (!obj) {
+		EXOFS_ERR("obj is NULL.\n");
+		return -EINVAL;
+	}
+
+	nvme_delete(obj->id | NVME_ATTR_KEY_HIGH);
 	return nvme_delete(obj->id);
 }
 
@@ -390,6 +401,13 @@ int exofs_set_obj_data(struct osd_obj_id *obj, void *p, unsigned length) {
 		return ret;
 	}
 	fcb.i_size = length;
+
+	// delete the object attribute and data	
+	ret = exofs_delete_obj(obj);
+	if (ret) {
+		EXOFS_ERR("exofs_delete_obj failed.\n");
+		return ret;
+	}
 
 	/* Write data into the data key, then update attributes (size) */
 	ret = nvme_kv_write(obj->id, false, p, length);
@@ -461,35 +479,22 @@ static void stats_done(struct ore_io_state *ios, void *p)
 /* Asynchronously write the stats attribute */
 int exofs_sbi_write_stats(struct exofs_sb_info *sbi)
 {
-	struct osd_attr attrs[] = {
-		[0] = g_attr_sb_stats,
-	};
-	struct ore_io_state *ios;
 	int ret;
-
-	ret = ore_get_io_state(&sbi->layout, &sbi->oc, &ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("%s: ore_get_io_state failed.\n", __func__);
-		return ret;
-	}
 
 	sbi->s_ess.s_nextid   = cpu_to_le64(sbi->s_nextid);
 	sbi->s_ess.s_numfiles = cpu_to_le64(sbi->s_numfiles);
-	attrs[0].val_ptr = &sbi->s_ess;
 
+	struct exofs_fscb data;
+	memset(&data, 0, sizeof(data));
+	data.s_nextid = cpu_to_le64(sbi->s_nextid);
+	data.s_magic = cpu_to_le16(EXOFS_SUPER_MAGIC);
+	data.s_newfs = 1;
+	data.s_numfiles = sbi->s_numfiles;
+	data.s_version = EXOFS_FSCB_VER;
+	data.s_dev_table_count = sbi->oc.numdevs;
 
-	ios->done = stats_done;
-	ios->private = sbi;
-	ios->out_attr = attrs;
-	ios->out_attr_len = ARRAY_SIZE(attrs);
-
-	ret = ore_write(ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("%s: ore_write failed.\n", __func__);
-		ore_put_io_state(ios);
-	}
-
-	return ret;
+	nvme_delete(EXOFS_SUPER_ID);
+	return nvme_kv_write(EXOFS_SUPER_ID, false, &data, sizeof(data));
 }
 
 /******************************************************************************
