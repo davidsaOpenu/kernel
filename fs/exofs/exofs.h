@@ -158,6 +158,10 @@ int exofs_write_begin(struct file *file, struct address_space *mapping,
 		struct page **pagep, void **fsdata);
 
 extern int exofs_get_obj_atribiute(struct osd_obj_id *obj, struct exofs_fcb *fcb);
+extern int exofs_set_obj_attribute(struct osd_obj_id *obj, void *p, unsigned length);
+extern int exofs_set_obj_data(struct osd_obj_id *obj, void *p, unsigned length);
+extern int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length);
+extern int exofs_delete_obj(struct osd_obj_id *obj);
 
 extern struct inode *exofs_iget(struct super_block *, unsigned long);
 struct inode *exofs_new_inode(struct inode *, umode_t);
