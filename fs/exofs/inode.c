@@ -1018,7 +1018,7 @@ int exofs_setattr(struct dentry *dentry, struct iattr *iattr)
 {
 	struct inode *inode = d_inode(dentry);
 	int error;
-
+	EXOFS_ERR("exofs_setattr: called on %pd\n", dentry);
 	/* if we are about to modify an object, and it hasn't been
 	 * created yet, wait
 	 */
@@ -1227,50 +1227,50 @@ struct inode *exofs_new_inode(struct inode *dir, umode_t mode)
 	struct super_block *sb = dir->i_sb;
 	struct exofs_sb_info *sbi = sb->s_fs_info;
 	struct inode *inode;
-	struct exofs_i_info *oi;
-	struct ore_io_state *ios;
+	struct osd_obj_id obj;
+	struct exofs_fcb fcb;
+
 	int ret;
 
 	inode = new_inode(sb);
-	if (!inode)
+	if (!inode) {
 		return ERR_PTR(-ENOMEM);
-
-	oi = exofs_i(inode);
-	__oi_init(oi);
-
-	set_obj_2bcreated(oi);
+	}
 
 	inode_init_owner(inode, dir, mode);
-	inode->i_ino = sbi->s_nextid++;
+	inode->i_ino = sbi->s_nextid++ + EXOFS_OBJ_OFF;
 	inode->i_blkbits = EXOFS_BLKSHIFT;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = current_time(inode);
-	oi->i_commit_size = inode->i_size = 0;
+
 	spin_lock(&sbi->s_next_gen_lock);
 	inode->i_generation = sbi->s_next_generation++;
 	spin_unlock(&sbi->s_next_gen_lock);
 	insert_inode_hash(inode);
 
-	exofs_init_comps(&oi->oc, &oi->one_comp, sb->s_fs_info,
-			 exofs_oi_objno(oi));
 	exofs_sbi_write_stats(sbi); /* Make sure new sbi->s_nextid is on disk */
 
 	mark_inode_dirty(inode);
 
-	ret = ore_get_io_state(&sbi->layout, &oi->oc, &ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("exofs_new_inode: ore_get_io_state failed\n");
-		return ERR_PTR(ret);
-	}
+	// write inode logic using the nvme obj set attribute
+	memset(&fcb, 0, sizeof(fcb));
+	fcb.i_mode = cpu_to_le16(inode->i_mode);
+	fcb.i_uid = cpu_to_le32(i_uid_read(inode));
+	fcb.i_gid = cpu_to_le32(i_gid_read(inode));
+	fcb.i_links_count = cpu_to_le16(inode->i_nlink);
+	fcb.i_ctime = cpu_to_le32(inode->i_ctime.tv_sec);
+	fcb.i_atime = cpu_to_le32(inode->i_atime.tv_sec);
+	fcb.i_mtime = cpu_to_le32(inode->i_mtime.tv_sec);
+	fcb.i_size = cpu_to_le64(inode->i_size);
+	fcb.i_generation = cpu_to_le32(inode->i_generation);
+	obj.id = inode->i_ino;
+	obj.partition = sbi->one_comp.obj.partition;
 
-	ios->done = create_done;
-	ios->private = inode;
-
-	ret = ore_create(ios);
+	ret = exofs_set_obj_attribute(&obj, &fcb, sizeof(fcb));
 	if (ret) {
-		ore_put_io_state(ios);
+		EXOFS_ERR("exofs_new_inode: exofs_set_obj_attribute failed inode=%lx ret=%d\n", inode->i_ino, ret);
 		return ERR_PTR(ret);
 	}
-	atomic_inc(&sbi->s_curr_pending);
+	EXOFS_ERR("exofs_new_inode: create inode=%lx\n", inode->i_ino);
 
 	return inode;
 }
@@ -1306,76 +1306,49 @@ static int exofs_update_inode(struct inode *inode, int do_sync)
 	struct exofs_i_info *oi = exofs_i(inode);
 	struct super_block *sb = inode->i_sb;
 	struct exofs_sb_info *sbi = sb->s_fs_info;
-	struct ore_io_state *ios;
-	struct osd_attr attr;
-	struct exofs_fcb *fcb;
-	struct updatei_args *args;
+	struct exofs_fcb fcb;
+	struct osd_obj_id obj;
 	int ret;
 
-	args = kzalloc(sizeof(*args), GFP_KERNEL);
-	if (!args) {
-		EXOFS_DBGMSG("Failed kzalloc of args\n");
-		return -ENOMEM;
-	}
-
-	fcb = &args->fcb;
-
-	fcb->i_mode = cpu_to_le16(inode->i_mode);
-	fcb->i_uid = cpu_to_le32(i_uid_read(inode));
-	fcb->i_gid = cpu_to_le32(i_gid_read(inode));
-	fcb->i_links_count = cpu_to_le16(inode->i_nlink);
-	fcb->i_ctime = cpu_to_le32(inode->i_ctime.tv_sec);
-	fcb->i_atime = cpu_to_le32(inode->i_atime.tv_sec);
-	fcb->i_mtime = cpu_to_le32(inode->i_mtime.tv_sec);
+	/* Build FCB from in-memory inode */
+	memset(&fcb, 0, sizeof(fcb));
+	fcb.i_mode = cpu_to_le16(inode->i_mode);
+	fcb.i_uid = cpu_to_le32(i_uid_read(inode));
+	fcb.i_gid = cpu_to_le32(i_gid_read(inode));
+	fcb.i_links_count = cpu_to_le16(inode->i_nlink);
+	fcb.i_ctime = cpu_to_le32(inode->i_ctime.tv_sec);
+	fcb.i_atime = cpu_to_le32(inode->i_atime.tv_sec);
+	fcb.i_mtime = cpu_to_le32(inode->i_mtime.tv_sec);
 	oi->i_commit_size = i_size_read(inode);
-	fcb->i_size = cpu_to_le64(oi->i_commit_size);
-	fcb->i_generation = cpu_to_le32(inode->i_generation);
+	fcb.i_size = cpu_to_le64(oi->i_commit_size);
+	fcb.i_generation = cpu_to_le32(inode->i_generation);
 
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
 		if (old_valid_dev(inode->i_rdev)) {
-			fcb->i_data[0] =
-				cpu_to_le32(old_encode_dev(inode->i_rdev));
-			fcb->i_data[1] = 0;
+			fcb.i_data[0] = cpu_to_le32(old_encode_dev(inode->i_rdev));
+			fcb.i_data[1] = 0;
 		} else {
-			fcb->i_data[0] = 0;
-			fcb->i_data[1] =
-				cpu_to_le32(new_encode_dev(inode->i_rdev));
-			fcb->i_data[2] = 0;
+			fcb.i_data[0] = 0;
+			fcb.i_data[1] = cpu_to_le32(new_encode_dev(inode->i_rdev));
+			fcb.i_data[2] = 0;
 		}
-	} else
-		memcpy(fcb->i_data, oi->i_data, sizeof(fcb->i_data));
-
-	ret = ore_get_io_state(&sbi->layout, &oi->oc, &ios);
-	if (unlikely(ret)) {
-		EXOFS_ERR("%s: ore_get_io_state failed.\n", __func__);
-		goto free_args;
+	} else {
+		memcpy(fcb.i_data, oi->i_data, sizeof(fcb.i_data));
 	}
 
-	attr = g_attr_inode_data;
-	attr.val_ptr = fcb;
-	ios->out_attr_len = 1;
-	ios->out_attr = &attr;
+	/* Object identifier for this inode */
+	obj.id = inode->i_ino;
+	obj.partition = sbi->one_comp.obj.partition;
 
-	wait_obj_created(oi);
+	EXOFS_ERR("exofs_update_inode: writing attr for ino=%lx size=%llu gen=%u\n",
+			inode->i_ino, _LLU(oi->i_commit_size), inode->i_generation);
 
-	if (!do_sync) {
-		args->sbi = sbi;
-		ios->done = updatei_done;
-		ios->private = args;
-	}
+	/* Directly write inode attributes using KV attribute key */
+	ret = exofs_set_obj_attribute(&obj, &fcb, sizeof(fcb));
+	if (ret)
+		EXOFS_ERR("exofs_update_inode: exofs_set_obj_attribute failed ino=%lx ret=%d\n",
+				inode->i_ino, ret);
 
-	ret = ore_write(ios);
-	if (!do_sync && !ret) {
-		atomic_inc(&sbi->s_curr_pending);
-		goto out; /* deallocation in updatei_done */
-	}
-
-	ore_put_io_state(ios);
-free_args:
-	kfree(args);
-out:
-	EXOFS_DBGMSG("(0x%lx) do_sync=%d ret=>%d\n",
-		     inode->i_ino, do_sync, ret);
 	return ret;
 }
 
@@ -1411,6 +1384,7 @@ void exofs_evict_inode(struct inode *inode)
 	struct ore_io_state *ios;
 	int ret;
 
+	EXOFS_ERR("exofs_evict_inode: called on %lx\n", inode->i_ino);
 	truncate_inode_pages_final(&inode->i_data);
 
 	/* TODO: should do better here */

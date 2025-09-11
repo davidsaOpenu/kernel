@@ -32,6 +32,7 @@
  */
 
 #include <linux/iversion.h>
+#include <linux/pagemap.h>
 #include "exofs.h"
 
 static inline unsigned exofs_chunk_size(struct inode *inode)
@@ -159,7 +160,6 @@ static struct page *exofs_get_page(struct inode *dir, unsigned long n)
 {
 	struct address_space *mapping = dir->i_mapping;
 	struct page *page = read_mapping_page(mapping, n, NULL);
-
 	if (!IS_ERR(page)) {
 		kmap(page);
 		if (unlikely(!PageChecked(page))) {
@@ -428,92 +428,185 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 	int namelen = dentry->d_name.len;
 	unsigned chunk_size = exofs_chunk_size(dir);
 	unsigned reclen = EXOFS_DIR_REC_LEN(namelen);
-	unsigned short rec_len, name_len;
-	struct page *page = NULL;
 	struct exofs_sb_info *sbi = inode->i_sb->s_fs_info;
 	struct exofs_dir_entry *de;
-	unsigned long npages = dir_pages(dir);
-	unsigned long n;
-	char *kaddr;
-	loff_t pos;
-	int err;
+	struct exofs_i_info *oi_dir = exofs_i(dir);
+	struct osd_obj_id obj;
+	struct exofs_fcb fcb;
+	void *buf = NULL;
+	size_t buf_len = 0;
+	size_t new_len;
+	size_t off;
+	int err = 0;
 
-	for (n = 0; n <= npages; n++) {
-		char *dir_end;
+	EXOFS_ERR("exofs_add_link: name %s, namelen %u\n", name, namelen);
 
-		page = exofs_get_page(dir, n);
-		err = PTR_ERR(page);
-		if (IS_ERR(page))
-			goto out;
-		lock_page(page);
-		kaddr = page_address(page);
-		dir_end = kaddr + exofs_last_byte(dir, n);
-		de = (struct exofs_dir_entry *)kaddr;
-		kaddr += PAGE_SIZE - reclen;
-		while ((char *)de <= kaddr) {
-			if ((char *)de == dir_end) {
-				name_len = 0;
-				rec_len = chunk_size;
-				de->rec_len = cpu_to_le16(chunk_size);
-				de->inode_no = 0;
-				goto got_it;
-			}
-			if (de->rec_len == 0) {
-				EXOFS_ERR("ERROR: exofs_add_link: "
-				      "zero-length entry in directory(0x%lx)\n",
-				      inode->i_ino);
-				err = -EIO;
-				goto out_unlock;
-			}
-			err = -EEXIST;
-			if (exofs_match(namelen, name, de))
-				goto out_unlock;
-			name_len = EXOFS_DIR_REC_LEN(de->name_len);
-			rec_len = le16_to_cpu(de->rec_len);
-			if (!de->inode_no && rec_len >= reclen)
-				goto got_it;
-			if (rec_len >= name_len + reclen)
-				goto got_it;
-			de = (struct exofs_dir_entry *) ((char *) de + rec_len);
+	/* Build directory object identifier */
+	obj.partition = oi_dir->one_comp.obj.partition;
+	obj.id = exofs_oi_objno(oi_dir);
+	EXOFS_ERR("exofs_add_link: dir ino=%lx obj.id=0x%llx partition=0x%llx\n", dir->i_ino, obj.id, obj.partition);
+
+	/* Read directory attributes for current size */
+	err = exofs_get_obj_atribiute(&obj, &fcb);
+	if (err) {
+		EXOFS_ERR("exofs_add_link: exofs_get_obj_atribiute failed err=%d\n", err);
+		return err;
+	}
+
+	buf_len = (size_t)le64_to_cpu(fcb.i_size);
+	EXOFS_ERR("exofs_add_link: current dir size=%zu chunk_size=%u\n", buf_len, chunk_size);
+
+	if (buf_len) {
+		err = exofs_get_obj_data(&obj, &buf, (unsigned)buf_len);
+		EXOFS_ERR("exofs_add_link: exofs_get_obj_data(len=%zu) -> %d buf=%p\n", buf_len, err, buf);
+		if (err) {
+			EXOFS_ERR("exofs_add_link: exofs_get_obj_data failed err=%d\n", err);
+			return err;
 		}
-		unlock_page(page);
-		exofs_put_page(page);
+	} else {
+		/* Initialize empty directory chunk if no data exists */
+		buf = kzalloc(chunk_size, GFP_KERNEL);
+		if (!buf)
+			return -ENOMEM;
+		buf_len = chunk_size;
+		de = (struct exofs_dir_entry *)buf;
+		de->inode_no = 0;
+		de->name_len = 0;
+		de->rec_len = cpu_to_le16(chunk_size);
+		EXOFS_ERR("exofs_add_link: initialized new dir chunk len=%u\n", chunk_size);
 	}
 
-	EXOFS_ERR("exofs_add_link: BAD dentry=%p or inode=0x%lx\n",
-		  dentry, inode->i_ino);
-	return -EINVAL;
+	/* Scan for space or extend and retry */
+restart_scan:
+	EXOFS_ERR("exofs_add_link: scanning for space buf_len=%zu\n", buf_len);
+	for (off = 0; off < buf_len; ) {
+		unsigned short rec_len;
+		unsigned short name_min;
 
-got_it:
-	pos = page_offset(page) +
-		(char *)de - (char *)page_address(page);
-	err = exofs_write_begin(NULL, page->mapping, pos, rec_len, 0,
-							&page, NULL);
+		de = (struct exofs_dir_entry *)((char *)buf + off);
+		rec_len = le16_to_cpu(de->rec_len);
+		if (rec_len == 0) {
+			EXOFS_ERR("exofs_add_link: ERROR zero rec_len at off=%zu\n", off);
+			err = -EIO;
+			goto out_free;
+		}
+		EXOFS_ERR("exofs_add_link: entry at off=%zu rec_len=%u name_len=%u inode_no=0x%llx\n",
+				 off, rec_len, de->name_len, _LLU(le64_to_cpu(de->inode_no)));
+
+		/* Ensure entry does not cross chunk boundary */
+		if (((off + rec_len - 1) ^ off) & ~(chunk_size - 1)) {
+			EXOFS_ERR("exofs_add_link: ERROR entry spans chunk boundary off=%zu rec_len=%u\n", off, rec_len);
+			err = -EIO;
+			goto out_free;
+		}
+
+		/* Duplicate name check */
+		if (exofs_match(namelen, name, de)) {
+			EXOFS_ERR("exofs_add_link: EEXIST matched existing name at off=%zu\n", off);
+			err = -EEXIST;
+			goto out_free;
+		}
+
+		name_min = EXOFS_DIR_REC_LEN(de->name_len);
+		EXOFS_ERR("exofs_add_link: name_min=%u reclen=%u\n", name_min, reclen);
+
+		/* Case 1: free record big enough */
+		if (!de->inode_no && rec_len >= reclen) {
+			struct exofs_dir_entry *new_de = de;
+			unsigned short remain = rec_len - reclen;
+			EXOFS_ERR("exofs_add_link: using free slot off=%zu remain=%u\n", off, remain);
+
+			if (remain) {
+				struct exofs_dir_entry *tail =
+					(struct exofs_dir_entry *)((char *)new_de + reclen);
+				tail->inode_no = 0;
+				tail->name_len = 0;
+				tail->rec_len = cpu_to_le16(remain);
+			}
+			new_de->rec_len = cpu_to_le16(reclen);
+			new_de->name_len = namelen;
+			memcpy(new_de->name, name, namelen);
+			new_de->inode_no = cpu_to_le64(inode->i_ino);
+			exofs_set_de_type(new_de, inode);
+			goto write_back;
+		}
+
+		/* Case 2: used record has tail space */
+		if (rec_len >= name_min + reclen) {
+			struct exofs_dir_entry *free_de =
+				(struct exofs_dir_entry *)((char *)de + name_min);
+			unsigned short free_len = rec_len - name_min;
+			EXOFS_ERR("exofs_add_link: splitting used entry off=%zu free_len=%u\n", off, free_len);
+
+			de->rec_len = cpu_to_le16(name_min);
+
+			if (free_len > reclen) {
+				struct exofs_dir_entry *tail =
+					(struct exofs_dir_entry *)((char *)free_de + reclen);
+				tail->inode_no = 0;
+				tail->name_len = 0;
+				tail->rec_len = cpu_to_le16(free_len - reclen);
+			}
+
+			free_de->rec_len = cpu_to_le16(reclen);
+			free_de->name_len = namelen;
+			memcpy(free_de->name, name, namelen);
+			free_de->inode_no = cpu_to_le64(inode->i_ino);
+			exofs_set_de_type(free_de, inode);
+			goto write_back;
+		}
+
+		off += rec_len;
+	}
+
+	/* No space found: extend directory by one chunk */
+	{
+		void *new_buf;
+		size_t old_len = buf_len;
+
+		new_buf = kzalloc(buf_len + chunk_size, GFP_KERNEL);
+		if (!new_buf) {
+			EXOFS_ERR("exofs_add_link: ENOMEM extending dir from %zu by %u\n", buf_len, chunk_size);
+			err = -ENOMEM;
+			goto out_free;
+		}
+		memcpy(new_buf, buf, buf_len);
+		kfree(buf);
+		buf = new_buf;
+		buf_len += chunk_size;
+
+		de = (struct exofs_dir_entry *)((char *)buf + old_len);
+		de->inode_no = 0;
+		de->name_len = 0;
+		de->rec_len = cpu_to_le16(chunk_size);
+		EXOFS_ERR("exofs_add_link: extended dir new_len=%zu\n", buf_len);
+		goto restart_scan;
+	}
+
+write_back:
+	/* Persist directory data; helper updates attribute size */
+	new_len = buf_len;
+	EXOFS_ERR("exofs_add_link: writing back new_len=%zu\n", new_len);
+	err = exofs_set_obj_data(&obj, buf, (unsigned)new_len);
+	EXOFS_ERR("exofs_add_link: exofs_set_obj_data -> %d\n", err);
 	if (err)
-		goto out_unlock;
-	if (de->inode_no) {
-		struct exofs_dir_entry *de1 =
-			(struct exofs_dir_entry *)((char *)de + name_len);
-		de1->rec_len = cpu_to_le16(rec_len - name_len);
-		de->rec_len = cpu_to_le16(name_len);
-		de = de1;
-	}
-	de->name_len = namelen;
-	memcpy(de->name, name, namelen);
-	de->inode_no = cpu_to_le64(inode->i_ino);
-	exofs_set_de_type(de, inode);
-	err = exofs_commit_chunk(page, pos, rec_len);
+		goto out_free;
+
+	/* Revalidate and update inode metadata */
+	inode_inc_iversion(dir);
+	invalidate_inode_pages2(dir->i_mapping);
+	if (new_len > i_size_read(dir))
+		i_size_write(dir, new_len);
 	dir->i_mtime = dir->i_ctime = current_time(dir);
 	mark_inode_dirty(dir);
 	sbi->s_numfiles++;
+	EXOFS_ERR("exofs_add_link: success s_numfiles=%u\n", sbi->s_numfiles);
 
-out_put:
-	exofs_put_page(page);
-out:
+out_free:
+	if (err)
+		EXOFS_ERR("exofs_add_link: returning err=%d\n", err);
+	kfree(buf);
 	return err;
-out_unlock:
-	unlock_page(page);
-	goto out_put;
 }
 
 int exofs_delete_entry(struct exofs_dir_entry *dir, struct page *page)
