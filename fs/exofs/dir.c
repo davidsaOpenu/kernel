@@ -233,72 +233,107 @@ void exofs_set_de_type(struct exofs_dir_entry *de, struct inode *inode)
 	de->file_type = exofs_type_by_mode[(mode & S_IFMT) >> S_SHIFT];
 }
 
-static int
-exofs_readdir(struct file *file, struct dir_context *ctx)
+static int exofs_readdir(struct file *file, struct dir_context *ctx)
 {
 	loff_t pos = ctx->pos;
 	struct inode *inode = file_inode(file);
-	unsigned int offset = pos & ~PAGE_MASK;
-	unsigned long n = pos >> PAGE_SHIFT;
-	unsigned long npages = dir_pages(inode);
 	unsigned chunk_mask = ~(exofs_chunk_size(inode)-1);
 	bool need_revalidate = !inode_eq_iversion(inode, file->f_version);
+    struct exofs_i_info* oi_dir = exofs_i(inode);
+    struct osd_obj_id obj;
+    struct exofs_fcb fcb;
+    void *buf = NULL;
+    size_t buf_len = 0;
+    int err = 0;
 
+	obj.partition = oi_dir->one_comp.obj.partition;
+	obj.id = exofs_oi_objno(oi_dir);
+	EXOFS_ERR("exofs_readdir: dir ino=%lx obj.id=0x%llx partition=0x%llx\n", inode->i_ino, obj.id, obj.partition);
+
+	/* Read directory attributes for current size */
+	err = exofs_get_obj_atribiute(&obj, &fcb);
+	if (err) {
+		EXOFS_ERR("exofs_readdir: exofs_get_obj_atribiute failed err=%d\n", err);
+		return err;
+	}
+
+	buf_len = (size_t)le64_to_cpu(fcb.i_size);
+	EXOFS_ERR("exofs_readdir: current dir size=%zu\n", buf_len);
+
+    if (buf_len) {
+		err = exofs_get_obj_data(&obj, &buf, (unsigned)buf_len);
+		EXOFS_ERR("exofs_readdir: exofs_get_obj_data(len=%zu) -> %d buf=%p\n", buf_len, err, buf);
+		if (err) {
+			EXOFS_ERR("exofs_readdir: exofs_get_obj_data failed err=%d\n", err);
+			return err;
+		}
+	}
 	if (pos > inode->i_size - EXOFS_DIR_REC_LEN(1))
 		return 0;
 
-	for ( ; n < npages; n++, offset = 0) {
-		char *kaddr, *limit;
-		struct exofs_dir_entry *de;
-		struct page *page = exofs_get_page(inode, n);
 
-		if (IS_ERR(page)) {
-			EXOFS_ERR("ERROR: bad page in directory(0x%lx)\n",
-				  inode->i_ino);
-			ctx->pos += PAGE_SIZE - offset;
-			return PTR_ERR(page);
-		}
-		kaddr = page_address(page);
-		if (unlikely(need_revalidate)) {
-			if (offset) {
-				offset = exofs_validate_entry(kaddr, offset,
-								chunk_mask);
-				ctx->pos = (n<<PAGE_SHIFT) + offset;
-			}
-			file->f_version = inode_query_iversion(inode);
-			need_revalidate = false;
-		}
+    if (buf && buf_len > 0) {
+        char *kaddr = (char *)buf;
+        char *limit = kaddr + buf_len - EXOFS_DIR_REC_LEN(1);
+        struct exofs_dir_entry *de;
+        unsigned int offset = (unsigned int)pos;  // Direct offset into buffer
+        
+        // Handle revalidation if needed
+        if (unlikely(need_revalidate)) {
+            if (offset) {
+                offset = exofs_validate_entry(kaddr, offset, chunk_mask);
+                ctx->pos = offset;
+            }
+            file->f_version = inode_query_iversion(inode);
+            need_revalidate = false;
+        }
+        if (offset >= buf_len) {
+            goto cleanup;
+        }
+
 		de = (struct exofs_dir_entry *)(kaddr + offset);
-		limit = kaddr + exofs_last_byte(inode, n) -
-							EXOFS_DIR_REC_LEN(1);
+	
 		for (; (char *)de <= limit; de = exofs_next_entry(de)) {
-			if (de->rec_len == 0) {
-				EXOFS_ERR("ERROR: "
-				     "zero-length entry in directory(0x%lx)\n",
-				     inode->i_ino);
-				exofs_put_page(page);
-				return -EIO;
-			}
-			if (de->inode_no) {
-				unsigned char t;
+            if ((char *)de + sizeof(*de) > kaddr + buf_len) {
+                EXOFS_ERR("ERROR: directory entry extends beyond buffer\n");
+                break;
+            }
 
-				if (de->file_type < EXOFS_FT_MAX)
-					t = exofs_filetype_table[de->file_type];
-				else
-					t = DT_UNKNOWN;
+        if (de->rec_len == 0) {
+            EXOFS_ERR("ERROR: zero-length entry in directory(0x%lx)\n", inode->i_ino);
+            err = -EIO;
+            goto cleanup;
+        }
 
-				if (!dir_emit(ctx, de->name, de->name_len,
-						le64_to_cpu(de->inode_no),
-						t)) {
-					exofs_put_page(page);
-					return 0;
-				}
-			}
+        // Another bounds check for full entry
+        if ((char *)de + le16_to_cpu(de->rec_len) > kaddr + buf_len) {
+            EXOFS_ERR("ERROR: directory entry record extends beyond buffer\n");
+            break;
+        }
+        
+        if (de->inode_no) {
+            unsigned char t;
+            
+            if (de->file_type < EXOFS_FT_MAX)
+                t = exofs_filetype_table[de->file_type];
+            else
+                t = DT_UNKNOWN;
+                
+            if (!dir_emit(ctx, de->name, de->name_len,
+                         le64_to_cpu(de->inode_no), t)) {
+                goto cleanup;
+            }
+        }
+
 			ctx->pos += le16_to_cpu(de->rec_len);
 		}
-		exofs_put_page(page);
-	}
-	return 0;
+    }
+
+cleanup:
+    if (buf) {
+        kfree(buf);
+    }
+    return err;
 }
 
 struct exofs_dir_entry *exofs_find_entry(struct inode *dir,
