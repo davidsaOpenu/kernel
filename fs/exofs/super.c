@@ -347,6 +347,7 @@ int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length)
 	void *buf = NULL;
 
 	ret = nvme_kv_read(obj->id, false, &buf, &len);
+	EXOFS_ERR("exofs_get_obj_data: obj.id=%llx length=%d ret=%d\n", obj->id, length, ret);
 	if (ret)
 		return ret;
 
@@ -958,7 +959,7 @@ static int exofs_fill_super(struct super_block *sb,
 	sb->s_op = &exofs_sops;
 	sb->s_export_op = &exofs_export_ops;
 	// [openu] TODO: need to make it read the inode using nvme
-	root = exofs_iget(sb, EXOFS_ROOT_ID - EXOFS_OBJ_OFF);
+	root = exofs_iget(sb, EXOFS_ROOT_ID);
 	if (IS_ERR(root)) {
 		EXOFS_ERR("ERROR: exofs_iget failed\n");
 		ret = PTR_ERR(root);

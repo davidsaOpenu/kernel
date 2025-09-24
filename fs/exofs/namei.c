@@ -53,6 +53,8 @@ static struct dentry *exofs_lookup(struct inode *dir, struct dentry *dentry,
 	struct inode *inode;
 	ino_t ino;
 
+	EXOFS_ERR("exofs_lookup: exofs_lookup started with inode=%lx\n", dir->i_ino);
+
 	if (dentry->d_name.len > EXOFS_NAME_LEN)
 		return ERR_PTR(-ENAMETOOLONG);
 

@@ -94,7 +94,7 @@ struct exofs_i_info {
 
 static inline osd_id exofs_oi_objno(struct exofs_i_info *oi)
 {
-	return oi->vfs_inode.i_ino + EXOFS_OBJ_OFF;
+	return oi->vfs_inode.i_ino;
 }
 
 /*

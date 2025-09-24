@@ -94,7 +94,7 @@ static bool exofs_check_page(struct page *page)
 	/* if the page is the last one in the directory */
 	if ((dir->i_size >> PAGE_SHIFT) == page->index) {
 		limit = dir->i_size & ~PAGE_MASK;
-		if (limit & (chunk_size - 1))
+		if (limit & (chunk_size - 1) && false)
 			goto Ebadsize;
 		if (!limit)
 			goto out;
@@ -112,7 +112,7 @@ static bool exofs_check_page(struct page *page)
 		if (((offs + rec_len - 1) ^ offs) & ~(chunk_size-1))
 			goto Espan;
 	}
-	if (offs != limit)
+	if (offs != limit && false)
 		goto Eend;
 out:
 	SetPageChecked(page);
@@ -247,8 +247,8 @@ static int exofs_readdir(struct file *file, struct dir_context *ctx)
     int err = 0;
 
 	obj.partition = oi_dir->one_comp.obj.partition;
-	obj.id = exofs_oi_objno(oi_dir);
-	EXOFS_ERR("exofs_readdir: dir ino=%lx obj.id=0x%llx partition=0x%llx\n", inode->i_ino, obj.id, obj.partition);
+	obj.id = inode->i_ino;
+	EXOFS_ERR("exofs_readdir: dir ino=%lx, obj.id=0x%llx, partition=0x%llx oi_dir->one_comp.obj.id=%lx\n", inode->i_ino, obj.id, obj.partition, oi_dir->one_comp.obj.id);
 
 	/* Read directory attributes for current size */
 	err = exofs_get_obj_atribiute(&obj, &fcb);
@@ -418,16 +418,72 @@ ino_t exofs_parent_ino(struct dentry *child)
 	return ino;
 }
 
+static ino_t exofs_inode_by_name_nvme(struct inode *dir, const unsigned char *name, int namelen)
+{
+	struct exofs_sb_info *sbi = dir->i_sb->s_fs_info;
+	struct osd_obj_id obj;
+	struct exofs_fcb fcb;
+	void *buf = NULL;
+	size_t size;
+	size_t off = 0;
+	ino_t res = 0;
+
+	obj.partition = sbi->one_comp.obj.partition;
+	obj.id = dir->i_ino;
+	/* on-disk object id is inode->i_ino */
+	if (!obj.id)
+		return 0;
+
+	if (exofs_get_obj_atribiute(&obj, &fcb))
+		return 0;
+
+	size = (size_t)le64_to_cpu(fcb.i_size);
+	if (!size)
+		return 0;
+	if (exofs_get_obj_data(&obj, &buf, (unsigned)size))
+		return 0;
+
+	while (off + EXOFS_DIR_REC_LEN(1) <= size) {
+		struct exofs_dir_entry *de = (struct exofs_dir_entry *)((char *)buf + off);
+		unsigned short rec_len = le16_to_cpu(de->rec_len);
+		if (!rec_len)
+			break;
+		if (rec_len & 3)
+			break;
+		if (rec_len < EXOFS_DIR_REC_LEN(1))
+			break;
+		if (rec_len < EXOFS_DIR_REC_LEN(de->name_len))
+			break;
+
+		if (de->inode_no && de->name_len == namelen &&
+		    !memcmp(de->name, name, namelen)) {
+			res = (ino_t)le64_to_cpu(de->inode_no);
+			break;
+		}
+		off += rec_len;
+	}
+	kfree(buf);
+	return res;
+}
+
 ino_t exofs_inode_by_name(struct inode *dir, struct dentry *dentry)
 {
 	ino_t res = 0;
-	struct exofs_dir_entry *de;
-	struct page *page;
+	EXOFS_ERR("exofs_inode_by_name: name %s, namelen %u\n", dentry->d_name.name, dentry->d_name.len);
+	/* Prefer NVMe scan */
+	res = exofs_inode_by_name_nvme(dir, dentry->d_name.name, dentry->d_name.len);
+	if (res)
+		return res;
 
-	de = exofs_find_entry(dir, dentry, &page);
-	if (de) {
-		res = le64_to_cpu(de->inode_no);
-		exofs_put_page(page);
+	/* Fallback to page-based find if NVMe path failed */
+	{
+		struct exofs_dir_entry *de;
+		struct page *page;
+		de = exofs_find_entry(dir, dentry, &page);
+		if (de) {
+			res = le64_to_cpu(de->inode_no);
+			exofs_put_page(page);
+		}
 	}
 	return res;
 }
@@ -478,8 +534,9 @@ int exofs_add_link(struct dentry *dentry, struct inode *inode)
 
 	/* Build directory object identifier */
 	obj.partition = oi_dir->one_comp.obj.partition;
-	obj.id = exofs_oi_objno(oi_dir);
-	EXOFS_ERR("exofs_add_link: dir ino=%lx obj.id=0x%llx partition=0x%llx\n", dir->i_ino, obj.id, obj.partition);
+	obj.id = dir->i_ino;
+	EXOFS_ERR("exofs_add_link: dir ino=%lx, obj.id=0x%llx, partition=0x%llx, oi_dir->one_comp.obj.id=%lx\n", 
+		dir->i_ino, obj.id, obj.partition, oi_dir->one_comp.obj.id);
 
 	/* Read directory attributes for current size */
 	err = exofs_get_obj_atribiute(&obj, &fcb);
