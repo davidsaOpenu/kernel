@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": false,
+      "key": {
+        "uuid": "83d34e90_5b665c7e",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 1
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-09-26T07:26:02Z",
+      "side": 1,
+      "message": "v: https://review.gerrithub.io/c/davidsaOpenu/simulator/+/1223190",
+      "revId": "0acdae7082f5b00b0b845d6e6a6995f6e04b64e1",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
