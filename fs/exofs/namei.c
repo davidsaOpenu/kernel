@@ -35,297 +35,374 @@
 
 static inline int exofs_add_nondir(struct dentry *dentry, struct inode *inode)
 {
-	EXOFS_ERR("exofs_add_nondir: exofs_add_link started with inode=%lx\n", inode->i_ino);
-	int err = exofs_add_link(dentry, inode);
-	if (!err) {
-		EXOFS_ERR("exofs_add_nondir: exofs_add_link ended with inode=%lx, err=%d\n", inode->i_ino, err);
-		d_instantiate(dentry, inode);
-		return 0;
-	}
-	inode_dec_link_count(inode);
-	iput(inode);
-	return err;	
+    EXOFS_ERR("exofs_add_nondir: exofs_add_link started with inode=%lx\n", inode->i_ino);
+    int err = exofs_add_link(dentry, inode);
+    if (!err) {
+        EXOFS_ERR("exofs_add_nondir: exofs_add_link ended with inode=%lx, err=%d\n", inode->i_ino, err);
+        d_instantiate(dentry, inode);
+        return 0;
+    }
+    inode_dec_link_count(inode);
+    iput(inode);
+    return err;    
 }
 
 static struct dentry *exofs_lookup(struct inode *dir, struct dentry *dentry,
-				   unsigned int flags)
+                   unsigned int flags)
 {
-	struct inode *inode;
-	ino_t ino;
+    struct inode *inode;
+    ino_t ino;
 
-	EXOFS_ERR("exofs_lookup: exofs_lookup started with inode=%lx\n", dir->i_ino);
+    EXOFS_ERR("exofs_lookup: exofs_lookup started with inode=%lx\n", dir->i_ino);
 
-	if (dentry->d_name.len > EXOFS_NAME_LEN)
-		return ERR_PTR(-ENAMETOOLONG);
+    if (dentry->d_name.len > EXOFS_NAME_LEN)
+        return ERR_PTR(-ENAMETOOLONG);
 
-	ino = exofs_inode_by_name(dir, dentry);
-	inode = ino ? exofs_iget(dir->i_sb, ino) : NULL;
-	return d_splice_alias(inode, dentry);
+    ino = exofs_inode_by_name(dir, dentry);
+    inode = ino ? exofs_iget(dir->i_sb, ino) : NULL;
+    return d_splice_alias(inode, dentry);
 }
 
 static int exofs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
-			 bool excl)
+             bool excl)
 {
-	struct inode *inode = exofs_new_inode(dir, mode);
-	int err = PTR_ERR(inode);
-	EXOFS_ERR("exofs_create: exofs_new_inode ended with inode=%p, err=%d\n", inode, err);
-	if (!IS_ERR(inode)) {
-		inode->i_op = &exofs_file_inode_operations;
-		inode->i_fop = &exofs_file_operations;
-		inode->i_mapping->a_ops = &exofs_aops;
-		mark_inode_dirty(inode);
-		err = exofs_add_nondir(dentry, inode);
-	}
+    struct inode *inode = exofs_new_inode(dir, mode);
+    int err = PTR_ERR(inode);
+    EXOFS_ERR("exofs_create: exofs_new_inode ended with inode=%p, err=%d\n", inode, err);
+    if (!IS_ERR(inode)) {
+        inode->i_op = &exofs_file_inode_operations;
+        inode->i_fop = &exofs_file_operations;
+        inode->i_mapping->a_ops = &exofs_aops;
+        mark_inode_dirty(inode);
+        err = exofs_add_nondir(dentry, inode);
+    }
 
-	EXOFS_ERR("exofs_create: exofs_add_nondir ended with inode=%p, err=%d\n", inode, err);
+    EXOFS_ERR("exofs_create: exofs_add_nondir ended with inode=%p, err=%d\n", inode, err);
 
-	return err;
+    return err;
 }
 
 static int exofs_mknod(struct inode *dir, struct dentry *dentry, umode_t mode,
-		       dev_t rdev)
+               dev_t rdev)
 {
-	struct inode *inode;
-	int err;
+    struct inode *inode;
+    int err;
 
-	inode = exofs_new_inode(dir, mode);
-	err = PTR_ERR(inode);
-	if (!IS_ERR(inode)) {
-		init_special_inode(inode, inode->i_mode, rdev);
-		mark_inode_dirty(inode);
-		err = exofs_add_nondir(dentry, inode);
-	}
-	return err;
+    inode = exofs_new_inode(dir, mode);
+    err = PTR_ERR(inode);
+    if (!IS_ERR(inode)) {
+        init_special_inode(inode, inode->i_mode, rdev);
+        mark_inode_dirty(inode);
+        err = exofs_add_nondir(dentry, inode);
+    }
+    return err;
 }
 
 static int exofs_symlink(struct inode *dir, struct dentry *dentry,
-			  const char *symname)
+              const char *symname)
 {
-	struct super_block *sb = dir->i_sb;
-	int err = -ENAMETOOLONG;
-	unsigned l = strlen(symname)+1;
-	struct inode *inode;
-	struct exofs_i_info *oi;
+    struct super_block *sb = dir->i_sb;
+    int err = -ENAMETOOLONG;
+    unsigned l = strlen(symname)+1;
+    struct inode *inode;
+    struct exofs_i_info *oi;
 
-	if (l > sb->s_blocksize)
-		goto out;
+    if (l > sb->s_blocksize)
+        goto out;
 
-	inode = exofs_new_inode(dir, S_IFLNK | S_IRWXUGO);
-	err = PTR_ERR(inode);
-	if (IS_ERR(inode))
-		goto out;
+    inode = exofs_new_inode(dir, S_IFLNK | S_IRWXUGO);
+    err = PTR_ERR(inode);
+    if (IS_ERR(inode))
+        goto out;
 
-	oi = exofs_i(inode);
-	if (l > sizeof(oi->i_data)) {
-		/* slow symlink */
-		inode->i_op = &page_symlink_inode_operations;
-		inode_nohighmem(inode);
-		inode->i_mapping->a_ops = &exofs_aops;
-		memset(oi->i_data, 0, sizeof(oi->i_data));
+    oi = exofs_i(inode);
+    if (l > sizeof(oi->i_data)) {
+        /* slow symlink */
+        inode->i_op = &page_symlink_inode_operations;
+        inode_nohighmem(inode);
+        inode->i_mapping->a_ops = &exofs_aops;
+        memset(oi->i_data, 0, sizeof(oi->i_data));
 
-		err = page_symlink(inode, symname, l);
-		if (err)
-			goto out_fail;
-	} else {
-		/* fast symlink */
-		inode->i_op = &simple_symlink_inode_operations;
-		inode->i_link = (char *)oi->i_data;
-		memcpy(oi->i_data, symname, l);
-		inode->i_size = l-1;
-	}
-	mark_inode_dirty(inode);
+        err = page_symlink(inode, symname, l);
+        if (err)
+            goto out_fail;
+    } else {
+        /* fast symlink */
+        inode->i_op = &simple_symlink_inode_operations;
+        inode->i_link = (char *)oi->i_data;
+        memcpy(oi->i_data, symname, l);
+        inode->i_size = l-1;
+    }
+    mark_inode_dirty(inode);
 
-	err = exofs_add_nondir(dentry, inode);
+    err = exofs_add_nondir(dentry, inode);
 out:
-	return err;
+    return err;
 
 out_fail:
-	inode_dec_link_count(inode);
-	iput(inode);
-	goto out;
+    inode_dec_link_count(inode);
+    iput(inode);
+    goto out;
 }
 
 static int exofs_link(struct dentry *old_dentry, struct inode *dir,
-		struct dentry *dentry)
+        struct dentry *dentry)
 {
-	struct inode *inode = d_inode(old_dentry);
+    struct inode *inode = d_inode(old_dentry);
 
-	inode->i_ctime = current_time(inode);
-	inode_inc_link_count(inode);
-	ihold(inode);
+    inode->i_ctime = current_time(inode);
+    inode_inc_link_count(inode);
+    ihold(inode);
 
-	return exofs_add_nondir(dentry, inode);
+    return exofs_add_nondir(dentry, inode);
 }
 
 static int exofs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 {
-	struct inode *inode;
-	int err;
+    struct inode *inode;
+    int err;
 
-	inode_inc_link_count(dir);
+    inode_inc_link_count(dir);
 
-	inode = exofs_new_inode(dir, S_IFDIR | mode);
-	err = PTR_ERR(inode);
-	if (IS_ERR(inode))
-		goto out_dir;
+    inode = exofs_new_inode(dir, S_IFDIR | mode);
+    err = PTR_ERR(inode);
+    if (IS_ERR(inode))
+        goto out_dir;
 
-	inode->i_op = &exofs_dir_inode_operations;
-	inode->i_fop = &exofs_dir_operations;
-	inode->i_mapping->a_ops = &exofs_aops;
+    inode->i_op = &exofs_dir_inode_operations;
+    inode->i_fop = &exofs_dir_operations;
+    inode->i_mapping->a_ops = &exofs_aops;
 
-	inode_inc_link_count(inode);
+    inode_inc_link_count(inode);
 
-	err = exofs_make_empty(inode, dir);
-	if (err)
-		goto out_fail;
+    err = exofs_make_empty(inode, dir);
+    if (err)
+        goto out_fail;
 
-	err = exofs_add_link(dentry, inode);
-	if (err)
-		goto out_fail;
+    err = exofs_add_link(dentry, inode);
+    if (err)
+        goto out_fail;
 
-	d_instantiate(dentry, inode);
+    d_instantiate(dentry, inode);
 out:
-	return err;
+    return err;
 
 out_fail:
-	inode_dec_link_count(inode);
-	inode_dec_link_count(inode);
-	iput(inode);
+    inode_dec_link_count(inode);
+    inode_dec_link_count(inode);
+    iput(inode);
 out_dir:
-	inode_dec_link_count(dir);
-	goto out;
+    inode_dec_link_count(dir);
+    goto out;
 }
 
 static int exofs_unlink(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-	struct exofs_dir_entry *de;
-	struct page *page;
-	int err = -ENOENT;
+    struct inode *inode = d_inode(dentry);
+    struct exofs_dir_entry *de;
+    struct exofs_dir_search_result search_result;
+    int err = -ENOENT;
 
-	de = exofs_find_entry(dir, dentry, &page);
-	if (!de)
-		goto out;
+    EXOFS_ERR("exofs_unlink: unlinking '%.*s' from dir ino=%lx\n",
+             dentry->d_name.len, dentry->d_name.name, dir->i_ino);
 
-	err = exofs_delete_entry(de, page);
-	if (err)
-		goto out;
+    // Find the directory entry
+    de = exofs_find_entry(dir, dentry, &search_result);
+    if (!de) {
+        EXOFS_ERR("exofs_unlink: entry not found\n");
+        goto out;
+    }
 
-	inode->i_ctime = dir->i_ctime;
-	inode_dec_link_count(inode);
-	err = 0;
+    // Delete the entry
+    err = exofs_delete_entry(de, dir, &search_result);
+
+    // Release the search result buffer (was held by find_entry)
+    exofs_release_search_result(&search_result);
+
+    if (err) {
+        EXOFS_ERR("exofs_unlink: delete_entry failed err=%d\n", err);
+        goto out;
+    }
+
+    // Update inode timestamps and link count
+    inode->i_ctime = dir->i_ctime;
+    inode_dec_link_count(inode);
+
+    EXOFS_ERR("exofs_unlink: successfully unlinked\n");
+    err = 0;
+
 out:
-	return err;
+    return err;
 }
 
 static int exofs_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-	int err = -ENOTEMPTY;
+    struct inode *inode = d_inode(dentry);
+    int err = -ENOTEMPTY;
 
-	if (exofs_empty_dir(inode)) {
-		err = exofs_unlink(dir, dentry);
-		if (!err) {
-			inode->i_size = 0;
-			inode_dec_link_count(inode);
-			inode_dec_link_count(dir);
-		}
-	}
-	return err;
+    if (exofs_empty_dir(inode)) {
+        err = exofs_unlink(dir, dentry);
+        if (!err) {
+            inode->i_size = 0;
+            inode_dec_link_count(inode);
+            inode_dec_link_count(dir);
+        }
+    }
+    return err;
 }
 
 static int exofs_rename(struct inode *old_dir, struct dentry *old_dentry,
-			struct inode *new_dir, struct dentry *new_dentry,
-			unsigned int flags)
+                        struct inode *new_dir, struct dentry *new_dentry,
+                        unsigned int flags)
 {
-	struct inode *old_inode = d_inode(old_dentry);
-	struct inode *new_inode = d_inode(new_dentry);
-	struct page *dir_page = NULL;
-	struct exofs_dir_entry *dir_de = NULL;
-	struct page *old_page;
-	struct exofs_dir_entry *old_de;
-	int err = -ENOENT;
+    struct inode *old_inode = d_inode(old_dentry);
+    struct inode *new_inode = d_inode(new_dentry);
+    struct exofs_dir_search_result dir_search = {0};
+    struct exofs_dir_entry *dir_de = NULL;
+    struct exofs_dir_search_result old_search;
+    struct exofs_dir_entry *old_de;
+    int err = -ENOENT;
 
-	if (flags & ~RENAME_NOREPLACE)
-		return -EINVAL;
+    if (flags & ~RENAME_NOREPLACE)
+        return -EINVAL;
 
-	old_de = exofs_find_entry(old_dir, old_dentry, &old_page);
-	if (!old_de)
-		goto out;
+    EXOFS_ERR("exofs_rename: renaming '%.*s' to '%.*s'\n",
+             old_dentry->d_name.len, old_dentry->d_name.name,
+             new_dentry->d_name.len, new_dentry->d_name.name);
 
-	if (S_ISDIR(old_inode->i_mode)) {
-		err = -EIO;
-		dir_de = exofs_dotdot(old_inode, &dir_page);
-		if (!dir_de)
-			goto out_old;
-	}
+    // Find the old directory entry
+    old_de = exofs_find_entry(old_dir, old_dentry, &old_search);
+    if (!old_de) {
+        EXOFS_ERR("exofs_rename: old entry not found\n");
+        goto out;
+    }
 
-	if (new_inode) {
-		struct page *new_page;
-		struct exofs_dir_entry *new_de;
+    // If renaming a directory, find its ".." entry
+    if (S_ISDIR(old_inode->i_mode)) {
+        err = -EIO;
+        dir_de = exofs_dotdot(old_inode, &dir_search);
+        if (!dir_de) {
+            EXOFS_ERR("exofs_rename: dotdot not found\n");
+            goto out_old;
+        }
+    }
 
-		err = -ENOTEMPTY;
-		if (dir_de && !exofs_empty_dir(new_inode))
-			goto out_dir;
+    // Handle target (new_inode) if it exists
+    if (new_inode) {
+        struct exofs_dir_search_result new_search;
+        struct exofs_dir_entry *new_de;
 
-		err = -ENOENT;
-		new_de = exofs_find_entry(new_dir, new_dentry, &new_page);
-		if (!new_de)
-			goto out_dir;
-		err = exofs_set_link(new_dir, new_de, new_page, old_inode);
-		new_inode->i_ctime = current_time(new_inode);
-		if (dir_de)
-			drop_nlink(new_inode);
-		inode_dec_link_count(new_inode);
-		if (err)
-			goto out_dir;
-	} else {
-		err = exofs_add_link(new_dentry, old_inode);
-		if (err)
-			goto out_dir;
-		if (dir_de)
-			inode_inc_link_count(new_dir);
-	}
+        // If target is a directory, ensure it's empty
+        err = -ENOTEMPTY;
+        if (dir_de && !exofs_empty_dir(new_inode)) {
+            EXOFS_ERR("exofs_rename: target directory not empty\n");
+            goto out_dir;
+        }
 
-	old_inode->i_ctime = current_time(old_inode);
+        // Find the new directory entry
+        err = -ENOENT;
+        new_de = exofs_find_entry(new_dir, new_dentry, &new_search);
+        if (!new_de) {
+            EXOFS_ERR("exofs_rename: new entry not found\n");
+            goto out_dir;
+        }
 
-	exofs_delete_entry(old_de, old_page);
-	mark_inode_dirty(old_inode);
+        // Replace the existing entry
+        err = exofs_set_link(new_dir, new_de, &new_search, old_inode);
 
-	if (dir_de) {
-		err = exofs_set_link(old_inode, dir_de, dir_page, new_dir);
-		inode_dec_link_count(old_dir);
-		if (err)
-			goto out_dir;
-	}
-	return 0;
+        // Release new search result
+        exofs_release_search_result(&new_search);
 
+        if (err) {
+            EXOFS_ERR("exofs_rename: set_link failed err=%d\n", err);
+            goto out_dir;
+        }
+
+        // Update target inode
+        new_inode->i_ctime = current_time(new_inode);
+        if (dir_de)
+            drop_nlink(new_inode);
+        inode_dec_link_count(new_inode);
+    } else {
+        // Create new entry (target doesn't exist)
+        err = exofs_add_link(new_dentry, old_inode);
+        if (err) {
+            EXOFS_ERR("exofs_rename: add_link failed err=%d\n", err);
+            goto out_dir;
+        }
+
+        if (dir_de)
+            inode_inc_link_count(new_dir);
+    }
+
+    // Update old inode timestamp
+    old_inode->i_ctime = current_time(old_inode);
+
+    // CRITICAL: exofs_add_link() modified the directory buffer, so old_search
+    // now points to freed memory. We must release it and re-find the entry.
+    exofs_release_search_result(&old_search);
+
+    // Re-find the old entry with the current directory buffer
+    old_de = exofs_find_entry(old_dir, old_dentry, &old_search);
+    if (!old_de) {
+        EXOFS_ERR("exofs_rename: old entry disappeared after add_link\n");
+        err = -ENOENT;
+        goto out_dir;
+    }
+
+    // Delete the old entry with the updated search result
+    err = exofs_delete_entry(old_de, old_dir, &old_search);
+
+    // Release old search result
+    exofs_release_search_result(&old_search);
+
+    if (err) {
+        EXOFS_ERR("exofs_rename: delete old entry failed err=%d\n", err);
+        goto out_dir;
+    }
+
+    mark_inode_dirty(old_inode);
+
+    // If renaming a directory, update its ".." entry
+    if (dir_de) {
+        err = exofs_set_link(old_inode, dir_de, &dir_search, new_dir);
+        inode_dec_link_count(old_dir);
+
+        // Release dir search result
+        exofs_release_search_result(&dir_search);
+
+        if (err) {
+            EXOFS_ERR("exofs_rename: update dotdot failed err=%d\n", err);
+            goto out;
+        }
+    }
+
+    EXOFS_ERR("exofs_rename: successfully renamed\n");
+    return 0;
 
 out_dir:
-	if (dir_de) {
-		kunmap(dir_page);
-		put_page(dir_page);
-	}
+    if (dir_de) {
+        exofs_release_search_result(&dir_search);
+    }
 out_old:
-	kunmap(old_page);
-	put_page(old_page);
+    exofs_release_search_result(&old_search);
 out:
-	return err;
+    return err;
 }
 
 const struct inode_operations exofs_dir_inode_operations = {
-	.create 	= exofs_create,
-	.lookup 	= exofs_lookup,
-	.link   	= exofs_link,
-	.unlink 	= exofs_unlink,
-	.symlink	= exofs_symlink,
-	.mkdir  	= exofs_mkdir,
-	.rmdir  	= exofs_rmdir,
-	.mknod  	= exofs_mknod,
-	.rename		= exofs_rename,
-	.setattr	= exofs_setattr,
+    .create     = exofs_create,
+    .lookup     = exofs_lookup,
+    .link       = exofs_link,
+    .unlink     = exofs_unlink,
+    .symlink    = exofs_symlink,
+    .mkdir      = exofs_mkdir,
+    .rmdir      = exofs_rmdir,
+    .mknod      = exofs_mknod,
+    .rename     = exofs_rename,
+    .setattr    = exofs_setattr,
 };
 
 const struct inode_operations exofs_special_inode_operations = {
-	.setattr	= exofs_setattr,
+    .setattr    = exofs_setattr,
 };
