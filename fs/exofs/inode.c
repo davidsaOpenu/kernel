@@ -877,39 +877,83 @@ static void _write_failed(struct inode *inode, loff_t to)
 }
 
 int exofs_write_begin(struct file *file, struct address_space *mapping,
-		loff_t pos, unsigned len, unsigned flags,
-		struct page **pagep, void **fsdata)
+                      loff_t pos, unsigned len, unsigned flags,
+                      struct page **pagep, void **fsdata)
 {
-	int ret = 0;
-	struct page *page;
+    int ret = 0;
+    struct page *page;
+    struct inode *inode = mapping->host;
+    struct exofs_i_info *oi = exofs_i(inode);
+    struct osd_obj_id obj;
+    pgoff_t index = pos >> PAGE_SHIFT;
 
-	EXOFS_ERR("exofs_write_begin: called\n");
-	page = *pagep;
-	if (page == NULL) {
-		page = grab_cache_page_write_begin(mapping, pos >> PAGE_SHIFT,
-						   flags);
-		if (!page)
-			return -ENOMEM;
-		*pagep = page;
-	}
+    EXOFS_ERR("exofs_write_begin: called pos=%lld len=%u\n", pos, len);
 
-	/* read-modify for partial-page writes within current EOF */
-	if (!PageUptodate(page) && (len != PAGE_SIZE)) {
-		loff_t i_size = i_size_read(mapping->host);
-		pgoff_t end_index = i_size >> PAGE_SHIFT;
+    page = grab_cache_page_write_begin(mapping, index, flags);
+    if (!page)
+        return -ENOMEM;
 
-		if (page->index > end_index) {
-			clear_highpage(page);
-			SetPageUptodate(page);
-		} else {
-			ret = _readpage(page, true);
-			if (ret) {
-				unlock_page(page);
-				EXOFS_DBGMSG("__readpage failed\n");
-			}
-		}
-	}
-	return ret;
+    *pagep = page;
+
+    /* If page is already up-to-date or we're writing a full page, we're done */
+    if (PageUptodate(page) || (len == PAGE_SIZE))
+        return 0;
+
+    /* For partial writes, we need to read existing data */
+    loff_t i_size = i_size_read(inode);
+
+    /* If writing beyond current file size, just zero the page */
+    if (pos >= i_size) {
+        zero_user(page, 0, PAGE_SIZE);
+        SetPageUptodate(page);
+        return 0;
+    }
+
+    /* Read the specific page from NVMe KV */
+    obj.partition = oi->one_comp.obj.partition;
+    obj.id = exofs_oi_objno(oi);
+
+    /* Calculate which part of the file this page represents */
+    loff_t page_start = (loff_t)index << PAGE_SHIFT;
+    loff_t page_end = page_start + PAGE_SIZE;
+    unsigned page_len = PAGE_SIZE;
+
+    /* If this page extends beyond EOF, only read up to EOF */
+    if (page_end > i_size)
+        page_len = i_size - page_start;
+
+    if (page_len > 0) {
+        void *file_buf = NULL;
+        unsigned file_size = i_size;
+
+        /* Read entire file (we'll optimize this later with page-level granularity) */
+        ret = exofs_get_obj_data(&obj, &file_buf, file_size);
+        if (ret) {
+            EXOFS_ERR("exofs_write_begin: failed to read file data err=%d\n", ret);
+            /* If read fails, zero the page and continue */
+            zero_user(page, 0, PAGE_SIZE);
+        } else {
+            void *kaddr = kmap_atomic(page);
+
+            /* Copy the relevant page data from file buffer */
+            if (page_start < file_size) {
+                unsigned copy_len = min_t(unsigned, page_len, file_size - page_start);
+                memcpy(kaddr, (char *)file_buf + page_start, copy_len);
+
+                /* Zero any remaining part of the page beyond EOF */
+                if (copy_len < PAGE_SIZE)
+                    memset((char *)kaddr + copy_len, 0, PAGE_SIZE - copy_len);
+            }
+
+            kunmap_atomic(kaddr);
+            kfree(file_buf);
+        }
+    } else {
+        zero_user(page, 0, PAGE_SIZE);
+    }
+
+    SetPageUptodate(page);
+    return 0;
 }
 
 static int exofs_write_begin_export(struct file *file,
@@ -924,69 +968,36 @@ static int exofs_write_begin_export(struct file *file,
 }
 
 static int exofs_write_end(struct file *file, struct address_space *mapping,
-			loff_t pos, unsigned len, unsigned copied,
-			struct page *page, void *fsdata)
+                           loff_t pos, unsigned len, unsigned copied,
+                           struct page *page, void *fsdata)
 {
-	struct inode *inode = mapping->host;
-	struct exofs_sb_info *sbi = inode->i_sb->s_fs_info;
-	struct osd_obj_id obj;
-	loff_t last_pos = pos + copied;
-	void *old_buf = NULL;
-	void *new_buf = NULL;
-	u64 old_size = i_size_read(inode);
-	u64 new_size = last_pos > old_size ? last_pos : old_size;
-	int ret = 0;
+    struct inode *inode = mapping->host;
 
-	/* Assemble full blob reflecting this write */
-	if (old_size) {
-		ret = exofs_get_obj_data(&obj, &old_buf, (unsigned)old_size);
-		if (ret) {
-			old_buf = NULL;
-			old_size = 0;
-		}
-	}
+    EXOFS_ERR("exofs_write_end: called pos=%lld len=%u copied=%u\n", pos, len, copied);
 
-	if (new_size) {
-		new_buf = kzalloc(new_size, GFP_KERNEL);
-		if (!new_buf) {
-			ret = -ENOMEM;
-			goto out_page;
-		}
-		if (old_buf)
-			memcpy(new_buf, old_buf, old_size);
-	}
+    /* Update page status */
+    if (copied == len) {
+        SetPageUptodate(page);
+    }
 
-	/* Copy just-written bytes from the page into the blob */
-	if (copied) {
-		void *kaddr = kmap_atomic(page);
-		memcpy((char *)new_buf + pos, (char *)kaddr + (pos & ~PAGE_MASK), copied);
-		kunmap_atomic(kaddr);
-	}
+    /* Mark page dirty - will be flushed later by writepage/writepages */
+    set_page_dirty(page);
 
-	/* Persist via KV; this updates data and inode size attribute */
-	obj.id = inode->i_ino;
-	obj.partition = sbi->one_comp.obj.partition;
-	ret = exofs_set_obj_data(&obj, new_buf, (unsigned)new_size);
-	if (ret)
-		goto out_page;
+    /* Update inode size if we extended the file */
+    loff_t last_pos = pos + copied;
+    if (last_pos > i_size_read(inode)) {
+        i_size_write(inode, last_pos);
+        mark_inode_dirty(inode);
+    }
 
-	/* Update in-memory inode */
-	if (new_size > old_size)
-		i_size_write(inode, new_size);
-	inode->i_mtime = inode->i_ctime = current_time(inode);
-	mark_inode_dirty(inode);
+    /* Update timestamps */
+    inode->i_mtime = inode->i_ctime = current_time(inode);
+    mark_inode_dirty(inode);
 
-	/* finalize page */
-	if (!PageUptodate(page) && copied == len)
-		SetPageUptodate(page);
-	set_page_dirty(page);
+    unlock_page(page);
+    put_page(page);
 
-out_page:
-	unlock_page(page);
-	put_page(page);
-	kfree(old_buf);
-	kfree(new_buf);
-	return ret ? 0 : copied;
+    return copied;
 }
 
 static int exofs_releasepage(struct page *page, gfp_t gfp)
