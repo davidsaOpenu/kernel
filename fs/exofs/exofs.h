@@ -92,6 +92,13 @@ struct exofs_i_info {
 	struct ore_components oc;	   /* inode view of the device table  */
 };
 
+struct exofs_dir_search_result {
+    struct exofs_dir_entry *de;
+    char *buf;              // Buffer containing directory data
+    size_t buf_len;         // Total buffer length
+    unsigned offset;        // Offset of entry within buffer
+};
+
 static inline osd_id exofs_oi_objno(struct exofs_i_info *oi)
 {
 	return oi->vfs_inode.i_ino;
@@ -171,15 +178,16 @@ extern void exofs_evict_inode(struct inode *);
 /* dir.c:                */
 int exofs_add_link(struct dentry *, struct inode *);
 ino_t exofs_inode_by_name(struct inode *, struct dentry *);
-int exofs_delete_entry(struct exofs_dir_entry *, struct page *);
+int exofs_delete_entry(struct exofs_dir_entry *dir, struct inode *inode,
+                        struct exofs_dir_search_result *search_result);
 int exofs_make_empty(struct inode *, struct inode *);
-struct exofs_dir_entry *exofs_find_entry(struct inode *, struct dentry *,
-					 struct page **);
-int exofs_empty_dir(struct inode *);
-struct exofs_dir_entry *exofs_dotdot(struct inode *, struct page **);
+struct exofs_dir_entry *exofs_find_entry(struct inode *dir, struct dentry *dentry,
+                                        struct exofs_dir_search_result *result);
+int exofs_empty_dir(struct inode *inode);
+struct exofs_dir_entry *exofs_dotdot(struct inode *dir, struct exofs_dir_search_result *result);
 ino_t exofs_parent_ino(struct dentry *child);
-int exofs_set_link(struct inode *, struct exofs_dir_entry *, struct page *,
-		    struct inode *);
+int exofs_set_link(struct inode *dir, struct exofs_dir_entry *de,
+                    struct exofs_dir_search_result *search_result, struct inode *inode);
 
 /* super.c               */
 void exofs_make_credential(u8 cred_a[OSD_CAP_LEN],
@@ -243,5 +251,16 @@ static inline void exofs_init_comps(struct ore_components *oc,
 	first_dev = (dev_mod * sbi->layout.mirrors_p1) % sbi->oc.numdevs;
 	oc->ods = &sbi->oc.ods[first_dev];
 }
+
+/* Helper function to free search result */
+static inline void exofs_release_search_result(struct exofs_dir_search_result *result)
+{
+    if (result && result->buf) {
+        kfree(result->buf);
+        result->buf = NULL;
+        result->de = NULL;
+    }
+}
+
 
 #endif
