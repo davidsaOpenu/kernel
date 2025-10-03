@@ -198,24 +198,41 @@ out_dir:
 
 static int exofs_unlink(struct inode *dir, struct dentry *dentry)
 {
-	struct inode *inode = d_inode(dentry);
-	struct exofs_dir_entry *de;
-	struct page *page;
-	int err = -ENOENT;
+    struct inode *inode = d_inode(dentry);
+    struct exofs_dir_entry *de;
+    struct exofs_dir_search_result search_result;
+    int err = -ENOENT;
 
-	de = exofs_find_entry(dir, dentry, &page);
-	if (!de)
-		goto out;
+    EXOFS_ERR("exofs_unlink: unlinking '%.*s' from dir ino=%lx\n",
+             dentry->d_name.len, dentry->d_name.name, dir->i_ino);
 
-	err = exofs_delete_entry(de, page);
-	if (err)
-		goto out;
+    // Find the directory entry
+    de = exofs_find_entry(dir, dentry, &search_result);
+    if (!de) {
+        EXOFS_ERR("exofs_unlink: entry not found\n");
+        goto out;
+    }
 
-	inode->i_ctime = dir->i_ctime;
-	inode_dec_link_count(inode);
-	err = 0;
+    // Delete the entry
+    err = exofs_delete_entry(de, dir, &search_result);
+
+    // Release the search result buffer (was held by find_entry)
+    exofs_release_search_result(&search_result);
+
+    if (err) {
+        EXOFS_ERR("exofs_unlink: delete_entry failed err=%d\n", err);
+        goto out;
+    }
+
+    // Update inode timestamps and link count
+    inode->i_ctime = dir->i_ctime;
+    inode_dec_link_count(inode);
+
+    EXOFS_ERR("exofs_unlink: successfully unlinked\n");
+    err = 0;
+
 out:
-	return err;
+    return err;
 }
 
 static int exofs_rmdir(struct inode *dir, struct dentry *dentry)
@@ -235,82 +252,142 @@ static int exofs_rmdir(struct inode *dir, struct dentry *dentry)
 }
 
 static int exofs_rename(struct inode *old_dir, struct dentry *old_dentry,
-			struct inode *new_dir, struct dentry *new_dentry,
-			unsigned int flags)
+                        struct inode *new_dir, struct dentry *new_dentry,
+                        unsigned int flags)
 {
-	struct inode *old_inode = d_inode(old_dentry);
-	struct inode *new_inode = d_inode(new_dentry);
-	struct page *dir_page = NULL;
-	struct exofs_dir_entry *dir_de = NULL;
-	struct page *old_page;
-	struct exofs_dir_entry *old_de;
-	int err = -ENOENT;
+    struct inode *old_inode = d_inode(old_dentry);
+    struct inode *new_inode = d_inode(new_dentry);
+    struct exofs_dir_search_result dir_search = {0};
+    struct exofs_dir_entry *dir_de = NULL;
+    struct exofs_dir_search_result old_search;
+    struct exofs_dir_entry *old_de;
+    int err = -ENOENT;
 
-	if (flags & ~RENAME_NOREPLACE)
-		return -EINVAL;
+    if (flags & ~RENAME_NOREPLACE)
+        return -EINVAL;
 
-	old_de = exofs_find_entry(old_dir, old_dentry, &old_page);
-	if (!old_de)
-		goto out;
+    EXOFS_ERR("exofs_rename: renaming '%.*s' to '%.*s'\n",
+             old_dentry->d_name.len, old_dentry->d_name.name,
+             new_dentry->d_name.len, new_dentry->d_name.name);
 
-	if (S_ISDIR(old_inode->i_mode)) {
-		err = -EIO;
-		dir_de = exofs_dotdot(old_inode, &dir_page);
-		if (!dir_de)
-			goto out_old;
-	}
+    // Find the old directory entry
+    old_de = exofs_find_entry(old_dir, old_dentry, &old_search);
+    if (!old_de) {
+        EXOFS_ERR("exofs_rename: old entry not found\n");
+        goto out;
+    }
 
-	if (new_inode) {
-		struct page *new_page;
-		struct exofs_dir_entry *new_de;
+    // If renaming a directory, find its ".." entry
+    if (S_ISDIR(old_inode->i_mode)) {
+        err = -EIO;
+        dir_de = exofs_dotdot(old_inode, &dir_search);
+        if (!dir_de) {
+            EXOFS_ERR("exofs_rename: dotdot not found\n");
+            goto out_old;
+        }
+    }
 
-		err = -ENOTEMPTY;
-		if (dir_de && !exofs_empty_dir(new_inode))
-			goto out_dir;
+    // Handle target (new_inode) if it exists
+    if (new_inode) {
+        struct exofs_dir_search_result new_search;
+        struct exofs_dir_entry *new_de;
 
-		err = -ENOENT;
-		new_de = exofs_find_entry(new_dir, new_dentry, &new_page);
-		if (!new_de)
-			goto out_dir;
-		err = exofs_set_link(new_dir, new_de, new_page, old_inode);
-		new_inode->i_ctime = current_time(new_inode);
-		if (dir_de)
-			drop_nlink(new_inode);
-		inode_dec_link_count(new_inode);
-		if (err)
-			goto out_dir;
-	} else {
-		err = exofs_add_link(new_dentry, old_inode);
-		if (err)
-			goto out_dir;
-		if (dir_de)
-			inode_inc_link_count(new_dir);
-	}
+        // If target is a directory, ensure it's empty
+        err = -ENOTEMPTY;
+        if (dir_de && !exofs_empty_dir(new_inode)) {
+            EXOFS_ERR("exofs_rename: target directory not empty\n");
+            goto out_dir;
+        }
 
-	old_inode->i_ctime = current_time(old_inode);
+        // Find the new directory entry
+        err = -ENOENT;
+        new_de = exofs_find_entry(new_dir, new_dentry, &new_search);
+        if (!new_de) {
+            EXOFS_ERR("exofs_rename: new entry not found\n");
+            goto out_dir;
+        }
 
-	exofs_delete_entry(old_de, old_page);
-	mark_inode_dirty(old_inode);
+        // Replace the existing entry
+        err = exofs_set_link(new_dir, new_de, &new_search, old_inode);
 
-	if (dir_de) {
-		err = exofs_set_link(old_inode, dir_de, dir_page, new_dir);
-		inode_dec_link_count(old_dir);
-		if (err)
-			goto out_dir;
-	}
-	return 0;
+        // Release new search result
+        exofs_release_search_result(&new_search);
 
+        if (err) {
+            EXOFS_ERR("exofs_rename: set_link failed err=%d\n", err);
+            goto out_dir;
+        }
+
+        // Update target inode
+        new_inode->i_ctime = current_time(new_inode);
+        if (dir_de)
+            drop_nlink(new_inode);
+        inode_dec_link_count(new_inode);
+    } else {
+        // Create new entry (target doesn't exist)
+        err = exofs_add_link(new_dentry, old_inode);
+        if (err) {
+            EXOFS_ERR("exofs_rename: add_link failed err=%d\n", err);
+            goto out_dir;
+        }
+
+        if (dir_de)
+            inode_inc_link_count(new_dir);
+    }
+
+    // Update old inode timestamp
+    old_inode->i_ctime = current_time(old_inode);
+
+    // CRITICAL: exofs_add_link() modified the directory buffer, so old_search
+    // now points to freed memory. We must release it and re-find the entry.
+    exofs_release_search_result(&old_search);
+
+    // Re-find the old entry with the current directory buffer
+    old_de = exofs_find_entry(old_dir, old_dentry, &old_search);
+    if (!old_de) {
+        EXOFS_ERR("exofs_rename: old entry disappeared after add_link\n");
+        err = -ENOENT;
+        goto out_dir;
+    }
+
+    // Delete the old entry with the updated search result
+    err = exofs_delete_entry(old_de, old_dir, &old_search);
+
+    // Release old search result
+    exofs_release_search_result(&old_search);
+    
+    if (err) {
+        EXOFS_ERR("exofs_rename: delete old entry failed err=%d\n", err);
+        goto out_dir;
+    }
+
+    mark_inode_dirty(old_inode);
+
+    // If renaming a directory, update its ".." entry
+    if (dir_de) {
+        err = exofs_set_link(old_inode, dir_de, &dir_search, new_dir);
+        inode_dec_link_count(old_dir);
+        
+        // Release dir search result
+        exofs_release_search_result(&dir_search);
+        
+        if (err) {
+            EXOFS_ERR("exofs_rename: update dotdot failed err=%d\n", err);
+            goto out;
+        }
+    }
+
+    EXOFS_ERR("exofs_rename: successfully renamed\n");
+    return 0;
 
 out_dir:
-	if (dir_de) {
-		kunmap(dir_page);
-		put_page(dir_page);
-	}
+    if (dir_de) {
+        exofs_release_search_result(&dir_search);
+    }
 out_old:
-	kunmap(old_page);
-	put_page(old_page);
+    exofs_release_search_result(&old_search);
 out:
-	return err;
+    return err;
 }
 
 const struct inode_operations exofs_dir_inode_operations = {
