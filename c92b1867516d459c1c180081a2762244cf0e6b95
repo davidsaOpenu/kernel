@@ -1,0 +1,21 @@
+{
+  "comments": [
+    {
+      "unresolved": true,
+      "key": {
+        "uuid": "9bb3279a_af334a86",
+        "filename": "/PATCHSET_LEVEL",
+        "patchSetId": 4
+      },
+      "lineNbr": 0,
+      "author": {
+        "id": 1007990
+      },
+      "writtenOn": "2025-10-05T06:31:22Z",
+      "side": 1,
+      "message": "Thanks for working on this. Just the whitespace changes clutter the git history",
+      "revId": "c92b1867516d459c1c180081a2762244cf0e6b95",
+      "serverId": "d5d70762-12d0-45a1-890d-524b12d3f735"
+    }
+  ]
+}
