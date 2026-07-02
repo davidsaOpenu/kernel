@@ -855,6 +855,7 @@ static int exofs_fill_super(struct super_block *sb,
 
 	struct ore_comp comp;
 	unsigned table_count;
+	int od_lookup_err = 0;
 	int ret;
 
 	/* use mount options to fill superblock */
@@ -864,12 +865,20 @@ static int exofs_fill_super(struct super_block *sb,
 		odi.osdname_len = strlen(opts->dev_name);
 		odi.osdname = (u8 *)opts->dev_name;
 		od = osduld_info_lookup(&odi);
+		if (IS_ERR(od)) {
+			od_lookup_err = PTR_ERR(od);
+			od = NULL;
+		}
 		kfree(opts->dev_name);
 		opts->dev_name = NULL;
 	} else {
 		// [openu] TODO: we might want to delete this line later.
 		// we don't want to use the osd device for mounting
 		od = osduld_path_lookup(opts->dev_name);
+		if (IS_ERR(od)) {
+			od_lookup_err = PTR_ERR(od);
+			od = NULL;
+		}
 	}
 
 	/* Default layout in case we do not have a device-table */
@@ -936,6 +945,11 @@ static int exofs_fill_super(struct super_block *sb,
 			goto free_sbi;
 	} else {
 		struct exofs_dev *eds;
+
+		if (!od) {
+			ret = od_lookup_err ?: -EINVAL;
+			goto free_sbi;
+		}
 
 		ret = __alloc_dev_table(sbi, 1, &eds);
 		if (unlikely(ret))
