@@ -1203,6 +1203,63 @@ int nvme_submit_sync_cmd(struct request_queue *q, struct nvme_command *cmd,
 }
 EXPORT_SYMBOL_GPL(nvme_submit_sync_cmd);
 
+ssize_t nvme_submit_sync_kv_cmd(struct nvme_ns *ns, u8 opcode, 
+	u64 key_low, u64 key_high, u8 key_length, 
+	u32 offset, void *buffer, unsigned bufflen)
+{
+	struct nvme_command cmd;
+	int ret;
+	union nvme_result result;
+
+	memset(&cmd, 0, sizeof(cmd));
+	cmd.kv.opcode = opcode;
+	cmd.kv.key_low = key_low;
+	cmd.kv.key_high = key_high;
+	cmd.kv.value_size = cpu_to_le32(bufflen);
+	cmd.kv.key_length = key_length;
+	cmd.kv.offset = cpu_to_le32(offset);
+	cmd.kv.nsid = cpu_to_le32(ns->head->ns_id);
+
+	ret = __nvme_submit_sync_cmd(ns->queue, &cmd, &result, 
+		buffer, bufflen, NVME_QID_ANY, 0);
+
+	if (ret < 0) return ret;
+
+	return result.u32;
+}
+EXPORT_SYMBOL_GPL(nvme_submit_sync_kv_cmd);
+
+ssize_t nvme_submit_sync_kv_read(struct nvme_ns* ns, uint64_t key, void *buffer, unsigned bufflen, unsigned off)
+{
+	return nvme_submit_sync_kv_cmd(ns, nvme_kv_retrieve, key, 0, NVME_OBJ_ID_MAXLEN, off, buffer, bufflen);
+}
+EXPORT_SYMBOL_GPL(nvme_submit_sync_kv_read);
+
+ssize_t nvme_submit_sync_kv_write(struct nvme_ns* ns, uint64_t key, const void *buffer, unsigned bufflen, unsigned off)
+{
+	return nvme_submit_sync_kv_cmd(ns, nvme_kv_store, key, 0, NVME_OBJ_ID_MAXLEN, off, (void*)buffer, bufflen);
+}
+EXPORT_SYMBOL_GPL(nvme_submit_sync_kv_write);
+
+int nvme_submit_sync_kv_delete(struct nvme_ns* ns, uint64_t key)
+{
+	const int err = nvme_submit_sync_kv_cmd(ns, nvme_kv_delete, key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, 0);
+	if (err < 0)
+		return err;
+	return err > 0 ? -ENOENT : 0;
+}
+EXPORT_SYMBOL_GPL(nvme_submit_sync_kv_delete);
+
+int nvme_submit_sync_kv_exists(struct nvme_ns* const ns, const uint64_t key)
+{
+	const int err = nvme_submit_sync_kv_cmd(ns, nvme_kv_exist, key, 0, NVME_OBJ_ID_MAXLEN, 0, NULL, 0);
+	if (err < 0)
+		return err;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(nvme_submit_sync_kv_exists);
+
+
 u32 nvme_command_effects(struct nvme_ctrl *ctrl, struct nvme_ns *ns, u8 opcode)
 {
 	u32 effects = 0;
@@ -5331,6 +5388,7 @@ EXPORT_SYMBOL_NS_GPL(nvme_ctrl_from_file, "NVME_TARGET_PASSTHRU");
 static inline void _nvme_check_size(void)
 {
 	BUILD_BUG_ON(sizeof(struct nvme_common_command) != 64);
+	BUILD_BUG_ON(sizeof(struct nvme_kv_command) != 64);
 	BUILD_BUG_ON(sizeof(struct nvme_rw_command) != 64);
 	BUILD_BUG_ON(sizeof(struct nvme_identify) != 64);
 	BUILD_BUG_ON(sizeof(struct nvme_features) != 64);

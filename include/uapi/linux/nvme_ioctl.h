@@ -94,6 +94,31 @@ struct nvme_uring_cmd {
 
 #define nvme_admin_cmd nvme_passthru_cmd
 
+enum nvme_kv_opcode {
+	nvme_kv_store     = 0x01,
+	nvme_kv_retrieve  = 0x02,
+	nvme_kv_list	  = 0x06,
+	nvme_kv_delete	  = 0x10,
+	nvme_kv_exist	  = 0x14,
+};
+
+#define NVME_OBJ_ID_MAXLEN	16
+
+struct nvme_user_obj_io {
+	__u8	opcode;
+	__u64   offset;
+	__u32	length; // in/out
+	__u64	addr;
+	union {
+		__u8 key[NVME_OBJ_ID_MAXLEN];
+		struct {
+			__u64 key_low;
+			__u64 key_high;
+		};
+	};
+	__u8	key_len;
+};
+
 #define NVME_IOCTL_ID		_IO('N', 0x40)
 #define NVME_IOCTL_ADMIN_CMD	_IOWR('N', 0x41, struct nvme_admin_cmd)
 #define NVME_IOCTL_SUBMIT_IO	_IOW('N', 0x42, struct nvme_user_io)
@@ -104,6 +129,7 @@ struct nvme_uring_cmd {
 #define NVME_IOCTL_ADMIN64_CMD	_IOWR('N', 0x47, struct nvme_passthru_cmd64)
 #define NVME_IOCTL_IO64_CMD	_IOWR('N', 0x48, struct nvme_passthru_cmd64)
 #define NVME_IOCTL_IO64_CMD_VEC	_IOWR('N', 0x49, struct nvme_passthru_cmd64)
+#define NVME_IOCTL_SUBMIT_OBJ_IO	_IOWR('N', 0x50, struct nvme_user_obj_io)
 
 /* io_uring async commands: */
 #define NVME_URING_CMD_IO	_IOWR('N', 0x80, struct nvme_uring_cmd)

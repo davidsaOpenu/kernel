@@ -1086,6 +1086,23 @@ struct nvme_common_command {
 	);
 };
 
+struct nvme_kv_command {
+	__u8			opcode;
+	__u8			flags;
+	__u16			command_id;
+	__le32			nsid;
+	__u64			key_low;
+	__le64			metadata;
+	union nvme_data_ptr	dptr;
+	__le32			value_size;
+	__u8			key_length;
+	__u8			options; // Relevent only to store/retreive
+	__u16			rsvd11;
+	__le32			offset;  // Relevent only to retreive. Out of spec, used to read from some offset
+	__u32			rsvd13;
+	__u64			key_high;
+};
+
 struct nvme_rw_command {
 	__u8			opcode;
 	__u8			flags;
@@ -1976,6 +1993,7 @@ struct streams_directive_params {
 struct nvme_command {
 	union {
 		struct nvme_common_command common;
+		struct nvme_kv_command kv;
 		struct nvme_rw_command rw;
 		struct nvme_identify identify;
 		struct nvme_features features;

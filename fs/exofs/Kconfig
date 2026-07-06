@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config EXOFS_FS
+	tristate "Exofs fs support"
+	select FS_IOMAP
+	help
+	  Exofs is a nonstandard Linux file system for nvme kv operations
