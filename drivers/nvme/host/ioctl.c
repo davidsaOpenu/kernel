@@ -326,6 +326,56 @@ static int nvme_user_cmd(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 	return status;
 }
 
+static int nvme_submit_obj_io(struct nvme_ns *ns,
+	struct nvme_user_obj_io __user *uio)
+{
+	struct nvme_command c;
+	struct nvme_user_obj_io io;
+	u64 result;
+	int ret;
+
+	if (copy_from_user(&io, uio, sizeof(io)))
+		return -EFAULT;
+
+	memset(&c, 0, sizeof(c));
+	c.kv.opcode = io.opcode;
+	c.kv.flags = 0;
+	c.kv.nsid = cpu_to_le32(ns->head->ns_id);
+	c.kv.key_low = io.key_low;
+	c.kv.key_high = io.key_high;
+	c.kv.value_size = cpu_to_le32(io.length);
+	c.kv.key_length = io.key_len;
+	c.kv.options = 0;
+	c.kv.offset = cpu_to_le32(io.offset);
+	ret = nvme_submit_user_cmd(ns->queue, &c, io.addr, io.length, NULL, 0, &result, 0, 0);
+	if (ret < 0) {
+		pr_err("Ret is %d\n", ret);
+		return ret;
+	}
+
+	// Copy to user if needed
+	switch (io.opcode) {
+	case nvme_kv_retrieve:
+		io.length = min((u64)result, io.length);
+		if (copy_to_user(uio, &io, sizeof(io)))
+			return -EFAULT;
+		break;
+	case nvme_kv_list:
+		io.length = result;
+		if (copy_to_user(uio, &io, sizeof(io)))
+			return -EFAULT;
+		break;
+	case nvme_kv_exist:
+		io.length = result;
+		if (copy_to_user(uio, &io, sizeof(io)))
+			return -EFAULT;
+		break;
+	}
+
+	return ret;
+}
+
+
 static int nvme_user_cmd64(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 		struct nvme_passthru_cmd64 __user *ucmd, unsigned int flags,
 		bool open_for_write)
@@ -603,6 +653,9 @@ static int nvme_ns_ioctl(struct nvme_ns *ns, unsigned int cmd,
 	case NVME_IOCTL_IO64_CMD:
 		return nvme_user_cmd64(ns->ctrl, ns, argp, flags,
 				       open_for_write);
+	case NVME_IOCTL_SUBMIT_OBJ_IO:
+		return nvme_submit_obj_io(ns, argp);
+
 	default:
 		return -ENOTTY;
 	}
@@ -844,6 +897,8 @@ out_unlock:
 	srcu_read_unlock(&ctrl->srcu, srcu_idx);
 	return ret;
 }
+
+
 
 long nvme_dev_ioctl(struct file *file, unsigned int cmd,
 		unsigned long arg)

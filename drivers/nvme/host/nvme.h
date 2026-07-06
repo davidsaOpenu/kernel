@@ -1280,4 +1280,12 @@ static inline bool nvme_multi_css(struct nvme_ctrl *ctrl)
 	return (ctrl->ctrl_config & NVME_CC_CSS_MASK) == NVME_CC_CSS_CSI;
 }
 
+ssize_t nvme_submit_sync_kv_cmd(struct nvme_ns *ns, u8 opcode, 
+	u64 key_low, u64 key_high, u8 key_length, 
+	u32 offset, void *buffer, unsigned bufflen);
+ssize_t nvme_submit_sync_kv_read(struct nvme_ns* ns, uint64_t key, void *buffer, unsigned bufflen, unsigned off);
+ssize_t nvme_submit_sync_kv_write(struct nvme_ns* ns, uint64_t key, const void *buffer, unsigned bufflen, unsigned off);
+int nvme_submit_sync_kv_delete(struct nvme_ns* ns, uint64_t key);
+int nvme_submit_sync_kv_exists(struct nvme_ns* ns, uint64_t key);
+
 #endif /* _NVME_H */
