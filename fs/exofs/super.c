@@ -164,6 +164,11 @@ static struct inode *exofs_alloc_inode(struct super_block *sb)
 	if (!oi)
 		return NULL;
 
+	/* recycled slab contents otherwise, and wait_obj_created() reads these */
+	oi->i_flags = 0;
+	init_waitqueue_head(&oi->i_wq);
+	mutex_init(&oi->i_image_lock);
+
 	inode_set_iversion(&oi->vfs_inode, 1);
 	return &oi->vfs_inode;
 }
@@ -340,10 +345,24 @@ int exofs_get_obj_atribiute(struct osd_obj_id *obj, struct exofs_fcb *fcb)
 	return 0;
 }
 
+/*
+ * KV retrieve asks the FTL for one byte more than requested, and the FTL
+ * refuses reads past the object's capacity (rounded up to whole
+ * EXOFS_KV_ALLOC_GRAIN pages), so a grain-multiple value can never be read
+ * back. Store one extra zero byte instead; reader and writer must agree, hence
+ * both go through here. Real fix belongs in nvme_ftl_retreive().
+ */
+static inline unsigned exofs_kv_value_len(unsigned length)
+{
+	if (length && !(length % EXOFS_KV_ALLOC_GRAIN))
+		return length + 1;
+	return length;
+}
+
 int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length)
 {
 	int ret;
-	uint32_t len = length;
+	uint32_t len = exofs_kv_value_len(length);
 	void *buf = NULL;
 
 	ret = nvme_kv_read(obj->id, false, &buf, &len);
@@ -351,7 +370,7 @@ int exofs_get_obj_data(struct osd_obj_id *obj, void **p, unsigned length)
 	if (ret)
 		return ret;
 
-	/* hand over ownership of the allocated buffer to caller */
+	/* caller owns the buffer; only the first @length bytes are file data */
 	*p = buf;
 	return 0;
 }
@@ -390,8 +409,10 @@ int exofs_set_obj_attribute(struct osd_obj_id *obj, void *p, unsigned length) {
 
 // get the inode attribute update size and write the data back with the new size
 int exofs_set_obj_data(struct osd_obj_id *obj, void *p, unsigned length) {
-	int ret;
+	unsigned stored_len = exofs_kv_value_len(length);
+	void *stored = p;
 	struct exofs_fcb fcb;
+	int ret;
 
 	EXOFS_ERR("exofs_set_obj_data: obj.id=%llx data size=%d\n", obj->id, length);
 	if (nvme_obj_exists(obj->id | NVME_ATTR_KEY_HIGH) != 0) {
@@ -403,23 +424,36 @@ int exofs_set_obj_data(struct osd_obj_id *obj, void *p, unsigned length) {
 		EXOFS_ERR("exofs_get_obj_atribiute failed err=%d\n", ret);
 		return ret;
 	}
-	fcb.i_size = length;
+	fcb.i_size = cpu_to_le64(length);
+
+	/* nvme_kv_write() copies stored_len bytes, so the pad byte needs our own */
+	if (stored_len != length) {
+		stored = kzalloc(stored_len, GFP_KERNEL);
+		if (!stored)
+			return -ENOMEM;
+		memcpy(stored, p, length);
+	}
 
 	// delete the object attribute and data
 	ret = exofs_delete_obj(obj);
 	if (ret) {
 		EXOFS_ERR("exofs_delete_obj failed.\n");
-		return ret;
+		goto out;
 	}
 
 	/* Write data into the data key, then update attributes (size) */
-	ret = nvme_kv_write(obj->id, false, p, length);
+	ret = nvme_kv_write(obj->id, false, stored, stored_len);
 	if (ret) {
 		EXOFS_ERR("nvme_kv_write failed data err=%d\n", ret);
-		return ret;
+		goto out;
 	}
 
-	return nvme_kv_write(obj->id, true, &fcb, EXOFS_INO_ATTR_SIZE);
+	ret = nvme_kv_write(obj->id, true, &fcb, EXOFS_INO_ATTR_SIZE);
+
+out:
+	if (stored != p)
+		kfree(stored);
+	return ret;
 }
 
 static const struct osd_attr g_attr_sb_stats = ATTR_DEF(
@@ -891,7 +925,7 @@ static int exofs_fill_super(struct super_block *sb,
 	strcpy(sb->s_id, "exofs");
 	sb->s_blocksize = EXOFS_BLKSIZE;
 	sb->s_blocksize_bits = EXOFS_BLKSHIFT;
-	sb->s_maxbytes = MAX_LFS_FILESIZE;
+	sb->s_maxbytes = EXOFS_MAX_OBJ_SIZE;
 	sb->s_max_links = EXOFS_LINK_MAX;
 	atomic_set(&sbi->s_curr_pending, 0);
 	sb->s_bdev = NULL;

@@ -32,6 +32,7 @@
  */
 
 #include <linux/slab.h>
+#include <linux/sched/mm.h>
 
 #include "exofs.h"
 
@@ -861,12 +862,288 @@ fail:
 	return ret;
 }
 
+/*
+ * The KV backend stores a file as one object and every store replaces the whole
+ * value, so a page cannot be written back on its own. Write-back assembles the
+ * full image - device contents plus the pages being flushed - and stores it in
+ * one exofs_set_obj_data().
+ */
+struct exofs_obj_image {
+	struct inode *inode;
+	struct osd_obj_id obj;
+	char *buf;		/* the image; NULL when size is 0 */
+	size_t size;		/* i_size snapshot */
+	struct page **pages;	/* held under writeback until the store */
+	unsigned int nr_pages;
+	unsigned int max_pages;
+};
+
+/* Prime the image from the device so the regions we are not flushing survive
+ * the store.
+ */
+static int _image_begin(struct exofs_obj_image *img, struct inode *inode)
+{
+	struct exofs_i_info *oi = exofs_i(inode);
+	struct exofs_sb_info *sbi = inode->i_sb->s_fs_info;
+	struct exofs_fcb fcb;
+	void *stored = NULL;
+	loff_t isize;
+	u64 stored_size;
+	int ret;
+
+	memset(img, 0, sizeof(*img));
+	img->inode = inode;
+	img->obj.partition = sbi->one_comp.obj.partition;
+	img->obj.id = exofs_oi_objno(oi);
+
+	ret = wait_obj_created(oi);
+	if (unlikely(ret))
+		return ret;
+
+	/* compare before narrowing: a 32-bit size_t would truncate past this */
+	isize = i_size_read(inode);
+	if (unlikely(isize > (loff_t)EXOFS_MAX_OBJ_SIZE))
+		return -EFBIG;
+
+	img->size = (size_t)isize;
+	if (!img->size)
+		return 0;
+
+	img->max_pages = DIV_ROUND_UP(img->size, PAGE_SIZE);
+	img->pages = kvmalloc_array(img->max_pages, sizeof(*img->pages),
+				    GFP_NOFS);
+	if (unlikely(!img->pages))
+		return -ENOMEM;
+
+	img->buf = kvzalloc(img->size, GFP_NOFS);
+	if (unlikely(!img->buf)) {
+		ret = -ENOMEM;
+		goto err;
+	}
+
+	ret = exofs_get_obj_atribiute(&img->obj, &fcb);
+	if (unlikely(ret))
+		goto err;
+
+	stored_size = le64_to_cpu(fcb.i_size);
+	if (!stored_size)	/* nothing stored yet, image stays zeroed */
+		return 0;
+	if (stored_size > img->size)	/* file shrank, drop the tail */
+		stored_size = img->size;
+
+	ret = exofs_get_obj_data(&img->obj, &stored, (unsigned)stored_size);
+	if (unlikely(ret))
+		goto err;
+
+	memcpy(img->buf, stored, stored_size);
+	kfree(stored);
+	return 0;
+
+err:
+	kvfree(img->buf);
+	img->buf = NULL;
+	kvfree(img->pages);
+	img->pages = NULL;
+	return ret;
+}
+
+static void _image_end(struct exofs_obj_image *img)
+{
+	kvfree(img->buf);
+	img->buf = NULL;
+	kvfree(img->pages);
+	img->pages = NULL;
+}
+
+/* Fold a page into the image and take ownership of it. Returns false if the
+ * page falls outside the snapshot; the caller must redirty it, because
+ * write_cache_pages() has already cleared its dirty bit.
+ */
+static bool _image_add_page(struct exofs_obj_image *img, struct page *page)
+{
+	loff_t pos = (loff_t)page->index << PAGE_SHIFT;
+	size_t len;
+	void *kaddr;
+
+	if (pos >= img->size)
+		return false;
+	if (unlikely(img->nr_pages >= img->max_pages))
+		return false;
+
+	len = min_t(size_t, PAGE_SIZE, img->size - pos);
+
+	kaddr = kmap_atomic(page);
+	memcpy(img->buf + pos, kaddr, len);
+	kunmap_atomic(kaddr);
+
+	get_page(page);
+	img->pages[img->nr_pages++] = page;
+	return true;
+}
+
+/* -EAGAIN: i_size moved while collecting, so the image would publish a stale
+ * size. Nothing is stored; the pages are redirtied for the next pass.
+ */
+static int _image_commit(struct exofs_obj_image *img)
+{
+	int ret;
+
+	if (!img->nr_pages)
+		return 0;
+
+	if (unlikely(i_size_read(img->inode) != (loff_t)img->size)) {
+		EXOFS_DBGMSG("(0x%lx) i_size moved 0x%zx -> 0x%llx, deferring\n",
+			     img->inode->i_ino, img->size,
+			     _LLU(i_size_read(img->inode)));
+		return -EAGAIN;
+	}
+
+	ret = exofs_set_obj_data(&img->obj, img->buf, (unsigned)img->size);
+	if (unlikely(ret))
+		EXOFS_ERR("%s: exofs_set_obj_data(0x%lx, 0x%zx) => %d\n",
+			  __func__, img->inode->i_ino, img->size, ret);
+	else
+		EXOFS_DBGMSG("(0x%lx) stored 0x%zx bytes from %u page(s)\n",
+			     img->inode->i_ino, img->size, img->nr_pages);
+	return ret;
+}
+
+/* Hand the collected pages back. On failure they return to the dirty list;
+ * -EAGAIN is a deferral, not an error, so it raises no PageError.
+ */
+static void _image_release(struct exofs_obj_image *img, int err)
+{
+	unsigned int i;
+
+	for (i = 0; i < img->nr_pages; i++) {
+		struct page *page = img->pages[i];
+
+		if (unlikely(err)) {
+			if (err != -EAGAIN)
+				SetPageError(page);
+			set_page_dirty(page);
+		}
+		end_page_writeback(page);
+		put_page(page);
+	}
+	img->nr_pages = 0;
+}
+
+/* Left under writeback until the single store at the end of the pass, so
+ * filemap_fdatawait() cannot report durability before the data is issued.
+ */
+static int _writepage_collect(struct page *page, struct writeback_control *wbc,
+			      void *data)
+{
+	struct exofs_obj_image *img = data;
+
+	BUG_ON(!PageLocked(page));
+
+	set_page_writeback(page);
+	if (!_image_add_page(img, page)) {
+		redirty_page_for_writepage(wbc, page);
+		end_page_writeback(page);
+	}
+	unlock_page(page);
+
+	return 0;
+}
+
 static int exofs_writepages(struct address_space *mapping,
 		       struct writeback_control *wbc)
 {
-	EXOFS_ERR("exofs_writepages: called\n");
-	/* KV backend commits synchronously in write_end for now */
-	return 0;
+	struct inode *inode = mapping->host;
+	struct exofs_i_info *oi = exofs_i(inode);
+	struct exofs_obj_image img;
+	unsigned int nofs;
+	int ret, commit_ret;
+
+	if (!mapping_tagged(mapping, PAGECACHE_TAG_DIRTY))
+		return 0;
+
+	/* One pass at a time: each builds a full image from the same device
+	 * state, so concurrent stores would erase each other's pages.
+	 */
+	mutex_lock(&oi->i_image_lock);
+	/* the KV helpers allocate GFP_KERNEL, and ->writepage runs from reclaim */
+	nofs = memalloc_nofs_save();
+
+	ret = _image_begin(&img, inode);
+	if (unlikely(ret)) {
+		EXOFS_ERR("exofs_writepages(0x%lx): _image_begin => %d\n",
+			  inode->i_ino, ret);
+		mapping_set_error(mapping, ret);
+		goto out;
+	}
+
+	ret = write_cache_pages(mapping, wbc, _writepage_collect, &img);
+
+	commit_ret = _image_commit(&img);
+	if (unlikely(commit_ret) && commit_ret != -EAGAIN) {
+		mapping_set_error(mapping, commit_ret);
+		if (!ret)
+			ret = commit_ret;
+	}
+	_image_release(&img, commit_ret);
+	_image_end(&img);
+
+out:
+	memalloc_nofs_restore(nofs);
+	mutex_unlock(&oi->i_image_lock);
+	return ret;
+}
+
+/* Reclaim and write_one_page(); the page arrives locked. */
+static int exofs_writepage(struct page *page, struct writeback_control *wbc)
+{
+	struct address_space *mapping = page->mapping;
+	struct inode *inode = mapping->host;
+	struct exofs_i_info *oi = exofs_i(inode);
+	struct exofs_obj_image img;
+	unsigned int nofs;
+	int ret;
+
+	BUG_ON(!PageLocked(page));
+
+	mutex_lock(&oi->i_image_lock);
+	nofs = memalloc_nofs_save();
+
+	ret = _image_begin(&img, inode);
+	if (unlikely(ret)) {
+		EXOFS_ERR("exofs_writepage(0x%lx, 0x%lx): _image_begin => %d\n",
+			  inode->i_ino, page->index, ret);
+		mapping_set_error(mapping, ret);
+		redirty_page_for_writepage(wbc, page);
+		unlock_page(page);
+		goto out;
+	}
+
+	set_page_writeback(page);
+	if (!_image_add_page(&img, page)) {
+		redirty_page_for_writepage(wbc, page);
+		end_page_writeback(page);
+		unlock_page(page);
+		_image_end(&img);
+		goto out;
+	}
+	unlock_page(page);
+
+	ret = _image_commit(&img);
+	if (unlikely(ret) && ret != -EAGAIN)
+		mapping_set_error(mapping, ret);
+	/* error set before the page leaves writeback: after that a racing evict
+	 * can free the inode this mapping belongs to
+	 */
+	_image_release(&img, ret);
+	_image_end(&img);
+
+	if (ret == -EAGAIN)
+		ret = 0;
+
+out:
+	memalloc_nofs_restore(nofs);
+	mutex_unlock(&oi->i_image_lock);
+	return ret;
 }
 
 /* i_mutex held using inode->i_size directly */
@@ -975,8 +1252,10 @@ static int exofs_write_end(struct file *file, struct address_space *mapping,
 
     EXOFS_ERR("exofs_write_end: called pos=%lld len=%u copied=%u\n", pos, len, copied);
 
-    /* Update page status */
-    if (copied == len) {
+    /* write-back stores whole pages, so the page must be fully initialised */
+    if (!PageUptodate(page)) {
+        if (copied < len)
+            zero_user(page, (pos & (PAGE_SIZE - 1)) + copied, len - copied);
         SetPageUptodate(page);
     }
 
@@ -1000,11 +1279,14 @@ static int exofs_write_end(struct file *file, struct address_space *mapping,
     return copied;
 }
 
+/*
+ * No per-page private state, so a clean page can always be dropped and there is
+ * nothing to tear down on invalidate.
+ */
 static int exofs_releasepage(struct page *page, gfp_t gfp)
 {
 	EXOFS_DBGMSG("page 0x%lx\n", page->index);
-	WARN_ON(1);
-	return 0;
+	return 1;
 }
 
 static void exofs_invalidatepage(struct page *page, unsigned int offset,
@@ -1012,7 +1294,6 @@ static void exofs_invalidatepage(struct page *page, unsigned int offset,
 {
 	EXOFS_DBGMSG("page 0x%lx offset 0x%x length 0x%x\n",
 		     page->index, offset, length);
-	WARN_ON(1);
 }
 
 
@@ -1025,7 +1306,7 @@ static ssize_t exofs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 const struct address_space_operations exofs_aops = {
 	.readpage	= exofs_readpage,
 	.readpages	= exofs_readpages,
-	.writepage	= NULL,
+	.writepage	= exofs_writepage,
 	.writepages	= exofs_writepages,
 	.write_begin	= exofs_write_begin_export,
 	.write_end	= exofs_write_end,
@@ -1092,6 +1373,9 @@ int exofs_setattr(struct dentry *dentry, struct iattr *iattr)
 	if (unlikely(error))
 		return error;
 
+	/* a resize landing inside a write-back pass would be undone on the device */
+	mutex_lock(&exofs_i(inode)->i_image_lock);
+
 	/* If size changes, just update i_size; do not touch data */
 	if ((iattr->ia_valid & ATTR_SIZE) &&
 	    iattr->ia_size != i_size_read(inode)) {
@@ -1103,7 +1387,10 @@ int exofs_setattr(struct dentry *dentry, struct iattr *iattr)
 	setattr_copy(inode, iattr);
 
 	/* Persist updated inode attributes only (no data writes) */
-	return exofs_update_inode(inode, 1);
+	error = exofs_update_inode(inode, 1);
+	mutex_unlock(&exofs_i(inode)->i_image_lock);
+
+	return error;
 }
 
 static const struct osd_attr g_attr_inode_file_layout = ATTR_DEF(
@@ -1289,6 +1576,7 @@ struct inode *exofs_new_inode(struct inode *dir, umode_t mode)
 	struct super_block *sb = dir->i_sb;
 	struct exofs_sb_info *sbi = sb->s_fs_info;
 	struct inode *inode;
+	struct exofs_i_info *oi;
 	struct osd_obj_id obj;
 	struct exofs_fcb fcb;
 
@@ -1298,6 +1586,7 @@ struct inode *exofs_new_inode(struct inode *dir, umode_t mode)
 	if (!inode) {
 		return ERR_PTR(-ENOMEM);
 	}
+	oi = exofs_i(inode);
 
 	inode_init_owner(inode, dir, mode);
 	inode->i_ino = sbi->s_nextid++ + EXOFS_OBJ_OFF;
@@ -1333,6 +1622,9 @@ struct inode *exofs_new_inode(struct inode *dir, umode_t mode)
 		return ERR_PTR(ret);
 	}
 	EXOFS_ERR("exofs_new_inode: create inode=%lx\n", inode->i_ino);
+
+	/* the attribute store above is synchronous, so the object exists now */
+	set_obj_created(oi);
 
 	return inode;
 }

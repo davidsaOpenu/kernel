@@ -90,6 +90,7 @@ struct exofs_i_info {
 	uint64_t       i_commit_size;      /* the object's written length     */
 	struct ore_comp one_comp;	   /* same component for all devices  */
 	struct ore_components oc;	   /* inode view of the device table  */
+	struct mutex   i_image_lock;       /* serialises object image writeback */
 };
 
 struct exofs_dir_search_result {
@@ -151,6 +152,20 @@ static inline struct exofs_i_info *exofs_i(struct inode *inode)
  * Maximum count of links to a file
  */
 #define EXOFS_LINK_MAX           32000
+
+/*
+ * A file is one KV object and the whole value moves in a single NVMe command,
+ * with both sides allocating the full length. sb->s_maxbytes is set to this so
+ * an oversized write fails -EFBIG at the VFS rather than during write-back.
+ */
+#define EXOFS_MAX_OBJ_SIZE	(1UL << 20)
+
+/*
+ * The FTL hands out object capacity in whole flash pages of this size (the
+ * PAGE_SIZE key in ssd.conf); see exofs_kv_value_len() in super.c. Not
+ * EXOFS_BLKSIZE - equal only by coincidence, and nothing keeps them in step.
+ */
+#define EXOFS_KV_ALLOC_GRAIN	4096
 
 /*************************
  * function declarations *
